@@ -18,6 +18,7 @@ Thread model
 """
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -88,7 +89,7 @@ class PlaybackController:
         silence = np.zeros((pre_roll_frames, audio_data.shape[1]), dtype=np.float32)
         full_audio = np.vstack([silence, audio_data])
 
-        done_event = sd.Event()
+        done_event = threading.Event()
 
         def _callback(
             outdata: np.ndarray,
@@ -124,6 +125,9 @@ class PlaybackController:
             if remaining <= frames:
                 raise sd.CallbackStop
 
+        def _finished_callback() -> None:
+            done_event.set()
+
         logger.info("Starting playback (pre-roll {:.1f}s) …", pre_roll)
         with sd.OutputStream(
             samplerate=sample_rate,
@@ -131,7 +135,7 @@ class PlaybackController:
             dtype="float32",
             device=device,
             callback=_callback,
-            finished_callback=done_event.set,
+            finished_callback=_finished_callback,
         ):
             done_event.wait(timeout=duration_s + pre_roll + 5.0)
 
