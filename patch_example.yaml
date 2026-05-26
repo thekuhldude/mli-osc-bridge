@@ -1,6 +1,11 @@
 # Example fixture patch for MLI-OSC-Bridge.
 # Edit to match your grandMA3 patch then run:
 #   mli-bridge setup-show --patch patch_example.yaml
+#
+# Group membership can be defined two ways (both work):
+#   1. Explicit:  add fixture_ids: [1, 2] to the group entry (preferred)
+#   2. Implicit:  set group: "front_wash" on each fixture (backward compat)
+# When fixture_ids is present it takes precedence.
 
 fixtures:
   - id: 1
@@ -55,12 +60,20 @@ groups:
   - name: "front_wash"
     label: "Front Wash"
     executor: 2
+    ma3_group_id: 2       # MA3 group number used in "Store Group N"
+    fixture_ids: [1, 2]   # explicit membership — overrides the group: field on fixtures
+
   - name: "back_wash"
     label: "Back Wash"
     executor: 3
+    ma3_group_id: 3
+    fixture_ids: [3, 4]
+
   - name: "moving_heads"
     label: "Moving Heads"
     executor: 4
+    ma3_group_id: 4
+    fixture_ids: [5, 6]
 
 presets:
   color:

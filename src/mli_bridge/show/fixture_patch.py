@@ -28,10 +28,22 @@ class FixtureInfo:
 
 @dataclass
 class GroupInfo:
-    """One group definition from the patch YAML."""
+    """One group definition from the patch YAML.
+
+    fixture_ids:
+        Explicit list of fixture IDs that belong to this group.
+        Populated from ``fixture_ids:`` in the YAML when present;
+        otherwise derived from fixtures whose ``group:`` field matches
+        this group's name (backward-compatible fallback).
+    ma3_group_id:
+        The MA3 group number used in ``Store Group <n>``.
+        Defaults to ``executor`` when not specified in the YAML.
+    """
     name: str
     label: str
     executor: int
+    fixture_ids: list[int] = field(default_factory=list)
+    ma3_group_id: int = 0   # set to executor in load_patch when absent
 
 
 @dataclass
@@ -106,14 +118,33 @@ def load_patch(path: Path) -> FixturePatch:
         for f in raw.get("fixtures", [])
     ]
 
-    groups = [
-        GroupInfo(
-            name=str(g["name"]),
-            label=str(g.get("label", g["name"])),
-            executor=int(g.get("executor", 1)),
-        )
-        for g in raw.get("groups", [])
-    ]
+    # Build a name→[fixture_id] index from the fixtures list so we can
+    # derive fixture_ids for groups that use the group: field on fixtures
+    # (backward-compatible format).
+    fixture_by_group: dict[str, list[int]] = {}
+    for f in fixtures:
+        fixture_by_group.setdefault(f.group, []).append(f.id)
+
+    groups: list[GroupInfo] = []
+    for g in raw.get("groups", []):
+        name = str(g["name"])
+        executor = int(g.get("executor", 1))
+        ma3_group_id = int(g.get("ma3_group_id", executor))
+
+        # Explicit fixture_ids in YAML take precedence; fall back to the
+        # fixtures whose group: field matches this group's name.
+        if "fixture_ids" in g:
+            fixture_ids = [int(fid) for fid in g["fixture_ids"]]
+        else:
+            fixture_ids = fixture_by_group.get(name, [])
+
+        groups.append(GroupInfo(
+            name=name,
+            label=str(g.get("label", name)),
+            executor=executor,
+            fixture_ids=fixture_ids,
+            ma3_group_id=ma3_group_id,
+        ))
 
     presets: list[ColorPreset] = []
     for cp in raw.get("presets", {}).get("color", []):
