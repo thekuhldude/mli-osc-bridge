@@ -1,0 +1,78 @@
+# Example fixture patch for MLI-OSC-Bridge.
+# Edit to match your grandMA3 patch then run:
+#   mli-bridge setup-show --patch patch_example.yaml
+
+fixtures:
+  - id: 1
+    name: "Front Wash L"
+    fixture_type: "LED PAR"
+    universe: 1
+    channel: 1
+    group: "front_wash"
+    position: "front_left"
+
+  - id: 2
+    name: "Front Wash R"
+    fixture_type: "LED PAR"
+    universe: 1
+    channel: 7
+    group: "front_wash"
+    position: "front_right"
+
+  - id: 3
+    name: "Back Wash L"
+    fixture_type: "LED PAR"
+    universe: 1
+    channel: 13
+    group: "back_wash"
+    position: "back_left"
+
+  - id: 4
+    name: "Back Wash R"
+    fixture_type: "LED PAR"
+    universe: 1
+    channel: 19
+    group: "back_wash"
+    position: "back_right"
+
+  - id: 5
+    name: "Moving Head L"
+    fixture_type: "Moving Head"
+    universe: 1
+    channel: 25
+    group: "moving_heads"
+    position: "truss_left"
+
+  - id: 6
+    name: "Moving Head R"
+    fixture_type: "Moving Head"
+    universe: 1
+    channel: 40
+    group: "moving_heads"
+    position: "truss_right"
+
+groups:
+  - name: "front_wash"
+    label: "Front Wash"
+    executor: 2
+  - name: "back_wash"
+    label: "Back Wash"
+    executor: 3
+  - name: "moving_heads"
+    label: "Moving Heads"
+    executor: 4
+
+presets:
+  color:
+    - name: "Red"
+      rgb: [255, 0, 0]
+    - name: "Green"
+      rgb: [0, 255, 0]
+    - name: "Blue"
+      rgb: [0, 0, 255]
+    - name: "White"
+      rgb: [255, 255, 255]
+    - name: "Amber"
+      rgb: [255, 191, 0]
+    - name: "Deep Blue"
+      rgb: [0, 0, 180]
