@@ -24,6 +24,10 @@ class FixtureInfo:
     channel: int
     group: str
     position: str
+    # Optional 3D stage position in metres (0,0,0 = unknown / use defaults)
+    x_m: float = 0.0   # distance from stage left
+    y_m: float = 0.0   # distance from stage front
+    z_m: float = 0.0   # height from floor
 
 
 @dataclass
@@ -59,6 +63,9 @@ class FixturePatch:
     fixtures: list[FixtureInfo] = field(default_factory=list)
     groups: list[GroupInfo] = field(default_factory=list)
     color_presets: list[ColorPreset] = field(default_factory=list)
+    # Stage physical dimensions from the YAML ``stage:`` section (metres).
+    # Keys: width_m, depth_m, height_m.  Empty dict → use geometry defaults.
+    stage_config: dict[str, float] = field(default_factory=dict)
 
     # Fast lookups
     _by_id: dict[int, FixtureInfo] = field(default_factory=dict, repr=False)
@@ -114,6 +121,9 @@ def load_patch(path: Path) -> FixturePatch:
             channel=int(f.get("channel", 1)),
             group=str(f.get("group", "default")),
             position=str(f.get("position", "unknown")),
+            x_m=float(f.get("x_m", 0.0)),
+            y_m=float(f.get("y_m", 0.0)),
+            z_m=float(f.get("z_m", 0.0)),
         )
         for f in raw.get("fixtures", [])
     ]
@@ -151,7 +161,19 @@ def load_patch(path: Path) -> FixturePatch:
         rgb = tuple(cp["rgb"])  # type: ignore[assignment]
         presets.append(ColorPreset(name=str(cp["name"]), rgb=rgb))  # type: ignore[arg-type]
 
-    patch = FixturePatch(fixtures=fixtures, groups=groups, color_presets=presets)
+    # Stage dimensions (optional section)
+    stage_raw = raw.get("stage", {})
+    stage_config: dict[str, float] = {}
+    for key in ("width_m", "depth_m", "height_m"):
+        if key in stage_raw:
+            stage_config[key] = float(stage_raw[key])
+
+    patch = FixturePatch(
+        fixtures=fixtures,
+        groups=groups,
+        color_presets=presets,
+        stage_config=stage_config,
+    )
     logger.info(
         "Patch loaded: {} fixtures, {} groups, {} color presets",
         len(fixtures),

@@ -1,12 +1,29 @@
 # Example fixture patch for MLI-OSC-Bridge.
 # Edit to match your grandMA3 patch then run:
-#   mli-bridge setup-show --patch patch_example.yaml
+#   mli-bridge setup-show patch_example.yaml
 #
 # Group membership can be defined two ways (both work):
 #   1. Explicit:  add fixture_ids: [1, 2] to the group entry (preferred)
 #   2. Implicit:  set group: "front_wash" on each fixture (backward compat)
 # When fixture_ids is present it takes precedence.
+#
+# 3D positions (x_m, y_m, z_m) are used by the grid-to-ma3 mapper:
+#   x_m  distance from stage LEFT edge  (metres)
+#   y_m  distance from stage FRONT edge (metres, not used for grid mapping)
+#   z_m  height from FLOOR              (metres)
+# Omit or set to 0 to use fixture-type defaults (see geometry.py).
 
+# ---------------------------------------------------------------------------
+# Stage physical dimensions — used by the grid-to-ma3 mapper.
+# ---------------------------------------------------------------------------
+stage:
+  width_m: 10.0    # left-to-right span
+  depth_m:  8.0    # front-to-back span
+  height_m:  4.0   # floor to truss / grid top
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
 fixtures:
   - id: 1
     name: "Front Wash L"
@@ -15,6 +32,9 @@ fixtures:
     channel: 1
     group: "front_wash"
     position: "front_left"
+    x_m: 2.0    # 2 m from stage left
+    y_m: 1.0    # 1 m from stage front
+    z_m: 0.5    # 0.5 m above floor
 
   - id: 2
     name: "Front Wash R"
@@ -23,6 +43,9 @@ fixtures:
     channel: 7
     group: "front_wash"
     position: "front_right"
+    x_m: 8.0
+    y_m: 1.0
+    z_m: 0.5
 
   - id: 3
     name: "Back Wash L"
@@ -31,6 +54,9 @@ fixtures:
     channel: 13
     group: "back_wash"
     position: "back_left"
+    x_m: 2.0
+    y_m: 6.0
+    z_m: 0.5
 
   - id: 4
     name: "Back Wash R"
@@ -39,6 +65,9 @@ fixtures:
     channel: 19
     group: "back_wash"
     position: "back_right"
+    x_m: 8.0
+    y_m: 6.0
+    z_m: 0.5
 
   - id: 5
     name: "Moving Head L"
@@ -47,6 +76,9 @@ fixtures:
     channel: 25
     group: "moving_heads"
     position: "truss_left"
+    x_m: 2.5
+    y_m: 4.0
+    z_m: 3.8    # near truss
 
   - id: 6
     name: "Moving Head R"
@@ -55,7 +87,13 @@ fixtures:
     channel: 40
     group: "moving_heads"
     position: "truss_right"
+    x_m: 7.5
+    y_m: 4.0
+    z_m: 3.8
 
+# ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
 groups:
   - name: "front_wash"
     label: "Front Wash"
@@ -75,6 +113,9 @@ groups:
     ma3_group_id: 4
     fixture_ids: [5, 6]
 
+# ---------------------------------------------------------------------------
+# Colour presets (used by setup-show)
+# ---------------------------------------------------------------------------
 presets:
   color:
     - name: "Red"

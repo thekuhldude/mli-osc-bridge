@@ -1,4 +1,4 @@
-"""MLI-OSC-Bridge CLI — five commands.
+"""MLI-OSC-Bridge CLI — six commands.
 
     mli-bridge test-connection   Verify grandMA3 is reachable via OSC
     mli-bridge setup-show        Init MA3 groups / presets / sequence
@@ -6,9 +6,11 @@
     mli-bridge play              Analyse + play + send OSC in real time
     mli-bridge preview           Print the first N events without sending OSC
     mli-bridge list-devices      List available audio output devices
+    mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
 """
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Optional
 
@@ -231,6 +233,95 @@ def cmd_list_devices() -> None:
 
     console.print(table)
     console.print("[dim]Set AUDIO_DEVICE=<name> in .env to select a device.[/dim]")
+
+
+@app.command("grid-to-ma3")
+def cmd_grid_to_ma3(
+    grid: Path = typer.Argument(
+        ...,
+        help="Path to grid video .npz (from MLI-Rulegen)",
+        exists=True,
+    ),
+    patch: Path = typer.Argument(
+        ...,
+        help="Path to fixture patch YAML",
+        exists=True,
+    ),
+    sequence_id: int = typer.Option(1, "--seq", "-s", help="MA3 sequence number"),
+    sequence_name: str = typer.Option("MLI_Show", "--name", "-n", help="MA3 sequence label"),
+    threshold: float = typer.Option(
+        10.0, "--threshold", "-t",
+        help="Minimum mean pixel change to create a cue (0–255)",
+    ),
+    max_cpm: float = typer.Option(
+        60.0, "--max-cpm", "-m",
+        help="Maximum cues per minute (limits cue density)",
+    ),
+    cols: int = typer.Option(12, help="Grid column count (must match .npz)"),
+    rows: int = typer.Option(8, help="Grid row count (must match .npz)"),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Analyse and build cues but do not send OSC",
+    ),
+) -> None:
+    """Convert a grid video .npz into a grandMA3 cue show (offline programming).
+
+    Reads the grid video produced by MLI-Rulegen, maps each fixture to a
+    grid coordinate using 3D stage geometry from the patch YAML, extracts
+    keyframes, builds MA3 cues and writes them all to grandMA3 via OSC.
+
+    \\b
+    Example:
+        mli-bridge grid-to-ma3 show.npz patch.yaml --seq 2 --name "Live Show"
+    """
+    from mli_bridge.mapper.pipeline import GridToMA3Pipeline
+
+    client, settings = _make_client()
+
+    console.print(
+        f"[bold]Grid → MA3 mapper[/bold]  "
+        f"grid=[cyan]{grid.name}[/cyan]  "
+        f"patch=[cyan]{patch.name}[/cyan]  "
+        f"Seq=[green]{sequence_id}[/green]"
+    )
+
+    if dry_run:
+        console.print("[yellow]--dry-run: analysis only, no OSC will be sent.[/yellow]")
+
+    pipeline = GridToMA3Pipeline(client, settings)
+    result = asyncio.run(
+        pipeline.run(
+            grid_path=grid,
+            patch_path=patch,
+            sequence_id=sequence_id,
+            sequence_name=sequence_name,
+            min_change_threshold=threshold,
+            max_cues_per_minute=max_cpm,
+            cols=cols,
+            rows=rows,
+            dry_run=dry_run,
+        )
+    )
+
+    table = Table(title="Pipeline result")
+    table.add_column("Property", style="cyan")
+    table.add_column("Value", style="green")
+
+    table.add_row("Grid frames", str(result.n_frames))
+    table.add_row("Duration", f"{result.duration_s:.1f} s")
+    table.add_row("Keyframes extracted", str(result.n_keyframes))
+    table.add_row("MA3 cues built", str(result.n_cues))
+    table.add_row("Fixtures addressed", str(result.n_fixtures))
+    table.add_row("Sequence", str(result.sequence_id))
+
+    console.print(table)
+    if not dry_run:
+        console.print(
+            f"[green]✓ Seq {result.sequence_id} '{sequence_name}' "
+            f"programmed with {result.n_cues} cues.[/green]"
+        )
+    else:
+        console.print("[yellow]Dry run complete — no OSC sent.[/yellow]")
 
 
 if __name__ == "__main__":
