@@ -145,15 +145,17 @@ def cmd_play(
 
     client, settings = _make_client()
 
+    fixture_ids: list[int] = []
     if patch:
         p = load_patch(patch)
         ShowInitializer(client, p, settings).run()
+        fixture_ids = [f.id for f in p.fixtures]
 
     console.print(f"[bold]Analysing {wav.name} …[/bold]")
     features = analyze(wav, fps=fps)
 
     console.print("[bold]Building event timeline …[/bold]")
-    scheduler = EventScheduler(settings)
+    scheduler = EventScheduler(settings, fixture_ids=fixture_ids or None)
     events = scheduler.build_timeline(features)
     console.print(f"[green]{len(events)} events scheduled[/green]")
 
@@ -191,11 +193,13 @@ def cmd_preview(
     table.add_column("#", style="dim", width=5)
     table.add_column("Time (s)", style="cyan", width=10)
     table.add_column("Type", style="magenta")
-    table.add_column("Payload summary", style="white")
+    table.add_column("MA3 command(s)", style="white")
 
     for i, ev in enumerate(events[:n]):
-        summary = ", ".join(f"{k}={v}" for k, v in list(ev.payload.items())[:3])
-        table.add_row(str(i + 1), f"{ev.time_s:.3f}", ev.command_type.name, summary)
+        # Show the actual MA3 command strings — the most useful preview info
+        cmds = ev.payload.get("commands", [])
+        cmd_str = " | ".join(cmds) if cmds else str(ev.payload)
+        table.add_row(str(i + 1), f"{ev.time_s:.3f}", ev.command_type.name, cmd_str)
 
     console.print(table)
     if len(events) > n:

@@ -1,25 +1,113 @@
 """Typed MA3 command helpers built on top of MA3OscClient.
 
-Every function corresponds to one logical MA3 action.  They all take
-the client as their first argument so they are easy to test by passing
-a mock.
+Two families of helpers live here:
 
-MA3 command-line reference used here:
-  - Go+ Seq <n>          advance a sequence
-  - Go- Seq <n>          step back
-  - Goto Seq <n> Cue <c> jump to a specific cue
-  - Off Seq <n>          deactivate sequence
-  - Store Seq <n> Cue <c> [/merge] store current output as cue
-  - Label Seq <n> "<label>" rename a sequence
-  - Assign Seq <n> /executor=<e> assign to executor
-  - Temp <val> If Seq <n>  set a temp value on the sequence
+1. **String builders** (no client argument) — pure functions that return
+   the MA3 command-line string.  The EventScheduler embeds their output
+   directly in OscEvent payloads so the CueEngine only needs to call
+   ``client.send_command(cmd)`` without any business logic.
+
+   Correct MA3 syntax for Generic RGB fixtures:
+     Intensity : "Fixture 1 Thru 4 At 80"
+     Color     : 'Fixture 1 Thru 4 At 100; Attribute "ColorRGB_R" At 255; ...'
+     Blackout  : "Fixture 1 Thru 4 At 0"
+
+2. **Client dispatchers** (take MA3OscClient) — thin wrappers around
+   ``client.send_command()`` kept for one-shot use in show setup code
+   (group_builder, sequence_builder, show_initializer).
 """
 from __future__ import annotations
 
 from mli_bridge.osc.client import MA3OscClient
 
 
-# ------------------------------------------------------------------ Sequences
+# ================================================================== String builders
+# These return a str and have NO side effects.  Import them in the
+# EventScheduler to pre-build command strings at analysis time.
+
+def set_intensity(fixture_ids: list[int], value_percent: float) -> str:
+    """Return a MA3 intensity command for a range of fixtures.
+
+    Parameters
+    ----------
+    fixture_ids:
+        All fixture IDs that belong to the target group.  The command
+        uses ``Fixture <lo> Thru <hi>`` addressing.
+    value_percent:
+        Dimmer level 0 – 100.
+    """
+    lo, hi = min(fixture_ids), max(fixture_ids)
+    pct = max(0.0, min(100.0, value_percent))
+    return f"Fixture {lo} Thru {hi} At {pct:.0f}"
+
+
+def set_color_rgb(
+    fixture_ids: list[int],
+    r: float,
+    g: float,
+    b: float,
+) -> str:
+    """Return a MA3 intensity+color command (fixtures at 100 % with RGB).
+
+    Parameters
+    ----------
+    fixture_ids:
+        Target fixture ID range.
+    r, g, b:
+        Color channel values 0 – 255.
+    """
+    lo, hi = min(fixture_ids), max(fixture_ids)
+    r_val = int(max(0, min(255, round(r))))
+    g_val = int(max(0, min(255, round(g))))
+    b_val = int(max(0, min(255, round(b))))
+    return (
+        f'Fixture {lo} Thru {hi} At 100; '
+        f'Attribute "ColorRGB_R" At {r_val}; '
+        f'Attribute "ColorRGB_G" At {g_val}; '
+        f'Attribute "ColorRGB_B" At {b_val}'
+    )
+
+
+def set_intensity_and_color(
+    fixture_ids: list[int],
+    intensity: float,
+    r: float,
+    g: float,
+    b: float,
+) -> str:
+    """Return a MA3 command that sets both intensity and RGB color.
+
+    Parameters
+    ----------
+    fixture_ids:
+        Target fixture ID range.
+    intensity:
+        Dimmer level 0 – 100.
+    r, g, b:
+        Color channel values 0 – 255.
+    """
+    lo, hi = min(fixture_ids), max(fixture_ids)
+    pct = max(0.0, min(100.0, intensity))
+    r_val = int(max(0, min(255, round(r))))
+    g_val = int(max(0, min(255, round(g))))
+    b_val = int(max(0, min(255, round(b))))
+    return (
+        f'Fixture {lo} Thru {hi} At {pct:.0f}; '
+        f'Attribute "ColorRGB_R" At {r_val}; '
+        f'Attribute "ColorRGB_G" At {g_val}; '
+        f'Attribute "ColorRGB_B" At {b_val}'
+    )
+
+
+def blackout(fixture_ids: list[int]) -> str:
+    """Return a MA3 command that sets all fixtures to 0 %."""
+    lo, hi = min(fixture_ids), max(fixture_ids)
+    return f"Fixture {lo} Thru {hi} At 0"
+
+
+# ================================================================== Client dispatchers
+# These call client.send_command() directly.  Used in show setup code
+# (group_builder, preset_builder, sequence_builder, show_initializer).
 
 def sequence_go(client: MA3OscClient, seq: int) -> None:
     """Advance sequence *seq* by one cue."""
@@ -64,56 +152,15 @@ def sequence_assign_executor(
     client.send_command(f"Assign Seq {seq} /executor={executor}")
 
 
-# ------------------------------------------------------------------ Groups / fixtures
-
-def group_at(client: MA3OscClient, group: int, dimmer: float) -> None:
-    """Set group *group* dimmer to *dimmer* (0 – 100 %)."""
-    pct = max(0.0, min(100.0, dimmer * 100.0))
-    client.send_command(f"Group {group} At {pct:.1f}")
-
-
-def fixture_at(client: MA3OscClient, fixture: int, dimmer: float) -> None:
-    """Set single fixture *fixture* dimmer to *dimmer* (0 – 100 %)."""
-    pct = max(0.0, min(100.0, dimmer * 100.0))
-    client.send_command(f"Fixture {fixture} At {pct:.1f}")
-
-
-def fixture_color(
-    client: MA3OscClient, fixture: int, r: int, g: int, b: int
-) -> None:
-    """Set RGB color on fixture *fixture* (0 – 255 each channel)."""
-    client.send_command(f"Fixture {fixture} At Color {r},{g},{b}")
-
-
-# ------------------------------------------------------------------ Executors / faders
-
-def executor_master_go(client: MA3OscClient, page: int, executor: int) -> None:
-    """Press the Go key for *executor* on *page*."""
-    client.press_key(page, executor)
-
-
 def set_master_dimmer(client: MA3OscClient, page: int, fader: int, level: float) -> None:
     """Set the master dimmer fader to *level* (0.0 – 1.0)."""
     client.set_fader(page, fader, level)
 
 
-# ------------------------------------------------------------------ Presets
-
-def apply_color_preset(
-    client: MA3OscClient, group: int, preset: int
-) -> None:
-    """Apply color preset *preset* to group *group*."""
-    client.send_command(f"Group {group} At ColorPreset {preset}")
-
-
-# ------------------------------------------------------------------ Macros
-
 def run_macro(client: MA3OscClient, macro: int) -> None:
     """Execute MA3 macro *macro* by number."""
     client.send_command(f"Do Macro {macro}")
 
-
-# ------------------------------------------------------------------ Utility
 
 def clear_all(client: MA3OscClient) -> None:
     """Clear programmer on the MA3 console."""
