@@ -2,19 +2,29 @@
 
 Two families of helpers live here:
 
-1. **String builders** (no client argument) — pure functions that return
-   the MA3 command-line string.  The EventScheduler embeds their output
-   directly in OscEvent payloads so the CueEngine only needs to call
-   ``client.send_command(cmd)`` without any business logic.
+1. **String builders** (no client argument) — pure functions used by
+   EventScheduler to pre-build command strings at analysis time.
 
-   Correct MA3 syntax for Generic RGB fixtures:
-     Intensity : "Fixture 1 Thru 4 At 80"
-     Color     : 'Fixture 1 Thru 4 At 100; Attribute "ColorRGB_R" At 255; ...'
-     Blackout  : "Fixture 1 Thru 4 At 0"
+   Correct MA3 syntax for Generic RGB fixtures
+   -------------------------------------------
+   Commands MUST be sent as separate /cmd calls; semicolon-chaining
+   does NOT work for Attribute commands.  The CueEngine sleeps 20 ms
+   between commands so MA3 processes each one before the next arrives.
+
+     Select + intensity : "Fixture 1 Thru 4 At 80"
+     Red channel        : 'Attribute "ColorRGB_R" At 255'
+     Green channel      : 'Attribute "ColorRGB_G" At 0'
+     Blue channel       : 'Attribute "ColorRGB_B" At 0'
+     Blackout           : "Fixture 1 Thru 4 At 0"
+
+   Return types
+   ------------
+   * Single-command operations → ``str``
+   * Multi-command operations  → ``list[str]``  (intensity + 3 attrs)
 
 2. **Client dispatchers** (take MA3OscClient) — thin wrappers around
-   ``client.send_command()`` kept for one-shot use in show setup code
-   (group_builder, sequence_builder, show_initializer).
+   ``client.send_command()`` kept for show-setup code (group_builder,
+   sequence_builder, show_initializer).
 """
 from __future__ import annotations
 
@@ -22,17 +32,14 @@ from mli_bridge.osc.client import MA3OscClient
 
 
 # ================================================================== String builders
-# These return a str and have NO side effects.  Import them in the
-# EventScheduler to pre-build command strings at analysis time.
 
 def set_intensity(fixture_ids: list[int], value_percent: float) -> str:
-    """Return a MA3 intensity command for a range of fixtures.
+    """Return a single MA3 intensity command (selects fixtures, sets dimmer).
 
     Parameters
     ----------
     fixture_ids:
-        All fixture IDs that belong to the target group.  The command
-        uses ``Fixture <lo> Thru <hi>`` addressing.
+        Target fixture IDs.  Addressed as ``Fixture <lo> Thru <hi>``.
     value_percent:
         Dimmer level 0 – 100.
     """
@@ -41,13 +48,23 @@ def set_intensity(fixture_ids: list[int], value_percent: float) -> str:
     return f"Fixture {lo} Thru {hi} At {pct:.0f}"
 
 
+def blackout(fixture_ids: list[int]) -> str:
+    """Return a single MA3 command that sets all fixtures to 0 %."""
+    lo, hi = min(fixture_ids), max(fixture_ids)
+    return f"Fixture {lo} Thru {hi} At 0"
+
+
 def set_color_rgb(
     fixture_ids: list[int],
     r: float,
     g: float,
     b: float,
-) -> str:
-    """Return a MA3 intensity+color command (fixtures at 100 % with RGB).
+) -> list[str]:
+    """Return four separate MA3 commands that select fixtures and set RGB color.
+
+    The first command selects the fixture range at full intensity.
+    The next three set each color channel via Attribute commands.
+    Each must be sent as a separate /cmd call with a 20 ms gap.
 
     Parameters
     ----------
@@ -60,12 +77,12 @@ def set_color_rgb(
     r_val = int(max(0, min(255, round(r))))
     g_val = int(max(0, min(255, round(g))))
     b_val = int(max(0, min(255, round(b))))
-    return (
-        f'Fixture {lo} Thru {hi} At 100; '
-        f'Attribute "ColorRGB_R" At {r_val}; '
-        f'Attribute "ColorRGB_G" At {g_val}; '
-        f'Attribute "ColorRGB_B" At {b_val}'
-    )
+    return [
+        f"Fixture {lo} Thru {hi} At 100",
+        f'Attribute "ColorRGB_R" At {r_val}',
+        f'Attribute "ColorRGB_G" At {g_val}',
+        f'Attribute "ColorRGB_B" At {b_val}',
+    ]
 
 
 def set_intensity_and_color(
@@ -74,8 +91,8 @@ def set_intensity_and_color(
     r: float,
     g: float,
     b: float,
-) -> str:
-    """Return a MA3 command that sets both intensity and RGB color.
+) -> list[str]:
+    """Return four separate MA3 commands that set intensity and RGB color.
 
     Parameters
     ----------
@@ -91,23 +108,15 @@ def set_intensity_and_color(
     r_val = int(max(0, min(255, round(r))))
     g_val = int(max(0, min(255, round(g))))
     b_val = int(max(0, min(255, round(b))))
-    return (
-        f'Fixture {lo} Thru {hi} At {pct:.0f}; '
-        f'Attribute "ColorRGB_R" At {r_val}; '
-        f'Attribute "ColorRGB_G" At {g_val}; '
-        f'Attribute "ColorRGB_B" At {b_val}'
-    )
-
-
-def blackout(fixture_ids: list[int]) -> str:
-    """Return a MA3 command that sets all fixtures to 0 %."""
-    lo, hi = min(fixture_ids), max(fixture_ids)
-    return f"Fixture {lo} Thru {hi} At 0"
+    return [
+        f"Fixture {lo} Thru {hi} At {pct:.0f}",
+        f'Attribute "ColorRGB_R" At {r_val}',
+        f'Attribute "ColorRGB_G" At {g_val}',
+        f'Attribute "ColorRGB_B" At {b_val}',
+    ]
 
 
 # ================================================================== Client dispatchers
-# These call client.send_command() directly.  Used in show setup code
-# (group_builder, preset_builder, sequence_builder, show_initializer).
 
 def sequence_go(client: MA3OscClient, seq: int) -> None:
     """Advance sequence *seq* by one cue."""

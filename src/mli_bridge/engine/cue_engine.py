@@ -157,9 +157,15 @@ class CueEngine:
     # ------------------------------------------------------------------ dispatch
 
     def _dispatch(self, ev: OscEvent) -> None:
-        """Fire all pre-built MA3 command strings carried in the event payload."""
+        """Fire all pre-built MA3 command strings carried in the event payload.
+
+        A 20 ms gap is inserted between consecutive commands within the same
+        event.  MA3 needs this pause to process ``Attribute`` commands after
+        a ``Fixture … At …`` selection; skipping it silently drops the colour
+        changes.  Single-command events (intensity / blackout) fire instantly.
+        """
         commands: list[str] = ev.payload.get("commands", [])
-        for cmd in commands:
+        for i, cmd in enumerate(commands):
             self._client.send_command(cmd)
             logger.trace(
                 "[{:.3f}s] {} → {}",
@@ -167,3 +173,5 @@ class CueEngine:
                 ev.command_type.name,
                 cmd,
             )
+            if i < len(commands) - 1:
+                time.sleep(0.020)  # 20 ms so MA3 processes each Attribute
