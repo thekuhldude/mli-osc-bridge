@@ -112,9 +112,14 @@ def load_patch(path: Path) -> FixturePatch:
     with path.open("r", encoding="utf-8") as fh:
         raw: dict[str, Any] = yaml.safe_load(fh)
 
-    fixtures = [
-        FixtureInfo(
-            id=int(f["id"]),
+    # ------------------------------------------------------------------
+    # Step 1: top-level fixtures (classic format, backward compat)
+    # ------------------------------------------------------------------
+    fixtures_by_id: dict[int, FixtureInfo] = {}
+    for f in raw.get("fixtures", []):
+        fid = int(f["id"])
+        fixtures_by_id[fid] = FixtureInfo(
+            id=fid,
             name=str(f["name"]),
             fixture_type=str(f.get("fixture_type", "Unknown")),
             universe=int(f.get("universe", 1)),
@@ -125,26 +130,71 @@ def load_patch(path: Path) -> FixturePatch:
             y_m=float(f.get("y_m", 0.0)),
             z_m=float(f.get("z_m", 0.0)),
         )
-        for f in raw.get("fixtures", [])
-    ]
 
-    # Build a name→[fixture_id] index from the fixtures list so we can
-    # derive fixture_ids for groups that use the group: field on fixtures
-    # (backward-compatible format).
-    fixture_by_group: dict[str, list[int]] = {}
-    for f in fixtures:
-        fixture_by_group.setdefault(f.group, []).append(f.id)
-
+    # ------------------------------------------------------------------
+    # Step 2: fixtures defined inside group entries (new format).
+    # Each group can carry a ``fixtures:`` list with per-fixture position
+    # data.  The group's ``fixture_type`` is inherited when not overridden.
+    # If a fixture ID was already loaded from the top-level list, only its
+    # 3D position is updated (position override).  Otherwise a new
+    # FixtureInfo is created with sensible defaults.
+    # ------------------------------------------------------------------
     groups: list[GroupInfo] = []
     for g in raw.get("groups", []):
         name = str(g["name"])
+        group_fixture_type = str(g.get("fixture_type", "Unknown"))
+        group_position = str(g.get("position", "unknown"))
         executor = int(g.get("executor", 1))
         ma3_group_id = int(g.get("ma3_group_id", executor))
 
-        # Explicit fixture_ids in YAML take precedence; fall back to the
-        # fixtures whose group: field matches this group's name.
+        for f_entry in g.get("fixtures", []):
+            fid = int(f_entry["id"])
+            x_m = float(f_entry.get("x_m", 0.0))
+            y_m = float(f_entry.get("y_m", 0.0))
+            z_m = float(f_entry.get("z_m", 0.0))
+            if fid in fixtures_by_id:
+                # Override 3D position for an already-loaded fixture
+                existing = fixtures_by_id[fid]
+                fixtures_by_id[fid] = FixtureInfo(
+                    id=existing.id,
+                    name=existing.name,
+                    fixture_type=str(f_entry.get("fixture_type", existing.fixture_type)),
+                    universe=existing.universe,
+                    channel=existing.channel,
+                    group=existing.group,
+                    position=existing.position,
+                    x_m=x_m,
+                    y_m=y_m,
+                    z_m=z_m,
+                )
+            else:
+                # New fixture defined only inside the group
+                fixtures_by_id[fid] = FixtureInfo(
+                    id=fid,
+                    name=str(f_entry.get("name", f"Fixture {fid}")),
+                    fixture_type=str(f_entry.get("fixture_type", group_fixture_type)),
+                    universe=int(f_entry.get("universe", 1)),
+                    channel=int(f_entry.get("channel", fid)),
+                    group=name,
+                    position=str(f_entry.get("position", group_position)),
+                    x_m=x_m,
+                    y_m=y_m,
+                    z_m=z_m,
+                )
+
+        # ------------------------------------------------------------------
+        # Step 3: resolve fixture_ids for this group (same logic as before)
+        # ------------------------------------------------------------------
+        # Build a name→[fixture_id] index from whatever we have so far
+        fixture_by_group: dict[str, list[int]] = {}
+        for fx in fixtures_by_id.values():
+            fixture_by_group.setdefault(fx.group, []).append(fx.id)
+
         if "fixture_ids" in g:
             fixture_ids = [int(fid) for fid in g["fixture_ids"]]
+        elif g.get("fixtures"):
+            # Derive from the group's own fixtures subsection
+            fixture_ids = [int(fe["id"]) for fe in g["fixtures"]]
         else:
             fixture_ids = fixture_by_group.get(name, [])
 
@@ -155,6 +205,9 @@ def load_patch(path: Path) -> FixturePatch:
             fixture_ids=fixture_ids,
             ma3_group_id=ma3_group_id,
         ))
+
+    # Final fixture list, sorted by ID for deterministic ordering
+    fixtures: list[FixtureInfo] = sorted(fixtures_by_id.values(), key=lambda f: f.id)
 
     presets: list[ColorPreset] = []
     for cp in raw.get("presets", {}).get("color", []):
