@@ -8,11 +8,14 @@ Pipeline steps
    ``stage:`` section (or use defaults).
 4. Extract keyframes.
 5. Build :class:`~mli_bridge.mapper.cue_builder.MA3Cue` objects.
-6. Write the show to grandMA3 via OSC (unless *dry_run*).
+6. Write the show to grandMA3 via OSC, including per-cue timecode triggers
+   (unless *dry_run*).
+7. Optionally start MA3 timecode + audio playback simultaneously so MA3
+   fires the cues automatically in sync with the music.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from loguru import logger
@@ -35,6 +38,7 @@ class PipelineResult:
     n_fixtures: int
     duration_s: float
     sequence_id: int
+    played: bool = field(default=False)
 
 
 class GridToMA3Pipeline:
@@ -63,6 +67,9 @@ class GridToMA3Pipeline:
         cols: int = 12,
         rows: int = 8,
         dry_run: bool = False,
+        audio_path: Path | None = None,
+        play_after_write: bool = False,
+        timecode_slot: int = 1,
     ) -> PipelineResult:
         """Execute the full pipeline.
 
@@ -84,6 +91,15 @@ class GridToMA3Pipeline:
             Grid dimensions.  Must match the .npz shape.
         dry_run:
             If ``True``, skip the OSC write step (steps 1-5 still run).
+        audio_path:
+            WAV/AIFF file to play in sync with MA3 after the show is written.
+            Only used when *play_after_write* is ``True``.
+        play_after_write:
+            If ``True`` (and not *dry_run*), configure MA3 timecode and start
+            audio + timecode simultaneously after writing all cues.
+            MA3 will fire cues automatically at the stored timecode positions.
+        timecode_slot:
+            MA3 timecode slot number (must be consistent between write and play).
 
         Returns
         -------
@@ -113,14 +129,35 @@ class GridToMA3Pipeline:
         builder = CueBuilder(patch, stage, cols=cols, rows=rows)
         cues: list[MA3Cue] = builder.build_all_cues(grid, keyframes)
 
+        played = False
+
         if not dry_run:
-            # 6. Write show
-            writer = ShowWriter(self._client, self._settings)
+            # 6. Write show (with per-cue timecode triggers)
+            writer = ShowWriter(
+                self._client,
+                self._settings,
+                tc_fps=int(round(grid.fps)),
+            )
             await writer.write_show(
                 cues,
                 sequence_id=sequence_id,
                 sequence_name=sequence_name,
+                tc_slot=timecode_slot,
             )
+
+            # 7. Start timecode + audio playback
+            if play_after_write:
+                if audio_path is None:
+                    logger.warning(
+                        "play_after_write=True but no audio_path given; "
+                        "starting timecode without audio."
+                    )
+                writer.start_timecode_playback(
+                    sequence_id=sequence_id,
+                    timecode_slot=timecode_slot,
+                    audio_path=audio_path,
+                )
+                played = True
         else:
             logger.info("Dry run — OSC write skipped.")
 
@@ -131,6 +168,7 @@ class GridToMA3Pipeline:
             n_fixtures=len(patch.fixtures),
             duration_s=grid.duration_s,
             sequence_id=sequence_id,
+            played=played,
         )
 
 

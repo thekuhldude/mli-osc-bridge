@@ -259,6 +259,19 @@ def cmd_grid_to_ma3(
     ),
     cols: int = typer.Option(12, help="Grid column count (must match .npz)"),
     rows: int = typer.Option(8, help="Grid row count (must match .npz)"),
+    audio: Optional[Path] = typer.Option(
+        None, "--audio", "-a",
+        help="WAV file for synchronized timecode playback (use with --play)",
+        exists=True,
+    ),
+    play: bool = typer.Option(
+        False, "--play", "-p",
+        help=(
+            "Start MA3 timecode + audio playback immediately after writing. "
+            "MA3 fires cues automatically at the stored timecode positions."
+        ),
+    ),
+    tc_slot: int = typer.Option(1, "--tc-slot", help="MA3 timecode slot number"),
     dry_run: bool = typer.Option(
         False, "--dry-run",
         help="Analyse and build cues but do not send OSC",
@@ -269,10 +282,15 @@ def cmd_grid_to_ma3(
     Reads the grid video produced by MLI-Rulegen, maps each fixture to a
     grid coordinate using 3D stage geometry from the patch YAML, extracts
     keyframes, builds MA3 cues and writes them all to grandMA3 via OSC.
+    Each cue is stored with a timecode trigger (HH:MM:SS.FF) so MA3 can
+    fire it automatically when the timecode clock reaches that position.
 
     \\b
-    Example:
+    Write only:
         mli-bridge grid-to-ma3 show.npz patch.yaml --seq 2 --name "Live Show"
+
+    Write + play immediately:
+        mli-bridge grid-to-ma3 show.npz patch.yaml --play --audio track.wav
     """
     from mli_bridge.mapper.pipeline import GridToMA3Pipeline
 
@@ -287,6 +305,16 @@ def cmd_grid_to_ma3(
 
     if dry_run:
         console.print("[yellow]--dry-run: analysis only, no OSC will be sent.[/yellow]")
+    if play and audio:
+        console.print(
+            f"[bold]Playback:[/bold] timecode slot [green]{tc_slot}[/green]  "
+            f"audio=[cyan]{audio.name}[/cyan]"
+        )
+    elif play:
+        console.print(
+            f"[bold]Playback:[/bold] timecode slot [green]{tc_slot}[/green]  "
+            "[yellow](no audio — use --audio to sync a WAV)[/yellow]"
+        )
 
     pipeline = GridToMA3Pipeline(client, settings)
     result = asyncio.run(
@@ -300,6 +328,9 @@ def cmd_grid_to_ma3(
             cols=cols,
             rows=rows,
             dry_run=dry_run,
+            audio_path=audio,
+            play_after_write=play,
+            timecode_slot=tc_slot,
         )
     )
 
@@ -313,13 +344,18 @@ def cmd_grid_to_ma3(
     table.add_row("MA3 cues built", str(result.n_cues))
     table.add_row("Fixtures addressed", str(result.n_fixtures))
     table.add_row("Sequence", str(result.sequence_id))
+    if not dry_run:
+        table.add_row("Timecode slot", str(tc_slot))
+        table.add_row("Played", "yes" if result.played else "no")
 
     console.print(table)
     if not dry_run:
         console.print(
             f"[green]✓ Seq {result.sequence_id} '{sequence_name}' "
-            f"programmed with {result.n_cues} cues.[/green]"
+            f"programmed with {result.n_cues} cues (timecode slot {tc_slot}).[/green]"
         )
+        if result.played:
+            console.print("[green]✓ Timecode playback complete.[/green]")
     else:
         console.print("[yellow]Dry run complete — no OSC sent.[/yellow]")
 
