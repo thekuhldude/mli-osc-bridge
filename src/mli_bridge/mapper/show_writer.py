@@ -12,9 +12,11 @@ For each cue:
    — MA3 requires separate /cmd calls; semicolon-chained commands
    silently drop Attribute changes.
 5. Repeat steps 1-4 for every fixture.
-6. ``Store Seq <id> Cue <n>.000 /NoConfirm``     — stores cue content
-7. ``Store Sequence <id> Cue <n>.0               — attaches timecode trigger
-      Timecode <slot> At HH:MM:SS.FF /NoConfirm``
+6. ``Store Sequence <id> Cue <n>.0 /NoConfirmation``   — stores cue content
+   50 ms gap
+7. ``Store Sequence <id> Cue <n>.0                    — attaches timecode trigger
+      Timecode <slot> At HH:MM:SS.FF /NoConfirmation``
+   (separate command: combining store + timecode in one call silently fails)
 8. ``Clear``
 
 Before the first cue, two preference commands suppress the interactive
@@ -184,16 +186,21 @@ class ShowWriter:
                 self._cmd(f'Attribute "ColorRGB_B" At {b}')
 
             # ---- store cue content ----
+            # Use the full "Sequence" keyword (not "Seq") and /NoConfirmation
+            # to reliably suppress the confirmation dialog.
             self._cmd(
-                f"Store Seq {sequence_id} Cue {cue.cue_number:.3f} /NoConfirm"
+                f"Store Sequence {sequence_id} Cue {cue.cue_number:.1f}"
+                f" /NoConfirmation"
             )
-            time.sleep(self._cue_gap)
+            # MA3 needs a short gap between storing the cue and attaching
+            # the timecode trigger — a combined single command silently fails.
+            await asyncio.sleep(0.05)
 
-            # ---- attach timecode trigger ----
+            # ---- attach timecode trigger (separate command) ----
             tc = _format_timecode(cue.time_s, self._tc_fps)
             self._cmd(
                 f"Store Sequence {sequence_id} Cue {cue.cue_number:.1f}"
-                f" Timecode {tc_slot} At {tc} /NoConfirm"
+                f" Timecode {tc_slot} At {tc} /NoConfirmation"
             )
 
             self._cmd("Clear")
