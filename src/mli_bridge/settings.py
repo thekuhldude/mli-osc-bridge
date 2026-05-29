@@ -32,8 +32,11 @@ class BridgeSettings(BaseSettings):
 
     # -------------------------------------------------------------- Playback
     pre_roll_seconds: float = Field(
-        default=0.5,
-        description="Lead-in silence before audio playback starts",
+        default=2.0,
+        description=(
+            "Seconds between Go+ Sequence and audio start.  "
+            "MA3 cue 1 TrigTime is set to this value so both fire together."
+        ),
     )
     playback_loop_interval_ms: float = Field(
         default=1.0,

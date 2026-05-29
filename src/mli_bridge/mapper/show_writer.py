@@ -5,32 +5,25 @@ Write strategy
 For each cue:
 
 1. ``Fixture <id> At <brightness_pct>``
-   — selects the fixture and sets its dimmer in the programmer.
-2. ``Attribute "ColorRGB_R" At <r>``   (25 ms gap)
-3. ``Attribute "ColorRGB_G" At <g>``   (25 ms gap)
-4. ``Attribute "ColorRGB_B" At <b>``   (25 ms gap)
-   — MA3 requires separate /cmd calls; semicolon-chained commands
-   silently drop Attribute changes.
-5. Repeat steps 1-4 for every fixture.
-6. ``Store Sequence <id> Cue <n>.0 /NoConfirmation``   — store content
-7. Set trigger type:
-     Cue 1   → TrigType "Go"    (waits for a manual Go+ before playing)
+2. ``Attribute "ColorRGB_R/G/B" At <n>``  (25 ms gaps each)
+3. Repeat for every fixture.
+4. ``Store Sequence <id> Cue <n>.0 /NoConfirmation``   — store content
+5. Set trigger type:
+     Cue 1   → TrigType "Time", TrigTime = pre_roll_s
+               (fires pre_roll_s after Go+ — gives MA3 prep time)
      Cue 2-N → TrigType "Time", TrigTime = seconds since previous cue
-               (MA3 advances automatically, no OSC needed during playback)
-8. ``Clear``
+               (MA3 advances automatically, no further OSC needed)
+6. ``Clear``
 
-Before the first cue, two preference commands suppress the interactive
-Store confirmation dialog for the duration of the write:
-  ``Set Preference "StoreMode" "CueOnly"``
-  ``Set Preference "StoreAskForMode" "Never"``
+Pre-roll timing
+---------------
+``Go+ Sequence N`` starts the MA3 internal clock at t=0.
+Cue 1 fires at t = pre_roll_s.
+Audio playback starts at t = pre_roll_s (simultaneously with cue 1).
+This eliminates timing drift by giving MA3 a clean run-up before the
+first cue and ensuring audio and MA3 are locked from the same moment.
 
-After all cues are written the sequence is labelled and cued up at cue 1.
-
-Playback
---------
-After writing, ``start_playback()`` fires ``Go+ Sequence N`` and
-(optionally) starts audio simultaneously so the first cue triggers and
-MA3 advances through the rest automatically.
+Pre-roll defaults to ``settings.pre_roll_seconds`` (default 2.0 s).
 
 Timing note
 -----------
@@ -94,12 +87,14 @@ class ShowWriter:
         cues: list[MA3Cue],
         sequence_id: int = 1,
         sequence_name: str = "MLI_Show",
+        pre_roll_s: float | None = None,
     ) -> None:
         """Program all cues into MA3 sequence *sequence_id*.
 
-        Cue 1 is set to **Go** trigger (waits for a manual start).
-        Cues 2-N are set to **Time** trigger so MA3 advances through them
-        automatically once playback begins — no further OSC is needed.
+        Cue 1 gets a **Time** trigger at *pre_roll_s* (fires that many
+        seconds after Go+).  Cues 2-N get **Time** triggers equal to the
+        gap since the previous cue.  MA3 advances automatically — no
+        further OSC is needed during playback.
 
         Parameters
         ----------
@@ -109,10 +104,16 @@ class ShowWriter:
             MA3 sequence number.
         sequence_name:
             Label applied after all cues are stored.
+        pre_roll_s:
+            Seconds from Go+ until cue 1 fires.  Defaults to
+            ``settings.pre_roll_seconds``.
         """
+        if pre_roll_s is None:
+            pre_roll_s = float(self._s.pre_roll_seconds)
+
         logger.info(
-            "ShowWriter: writing {} cues → Seq {}  '{}'",
-            len(cues), sequence_id, sequence_name,
+            "ShowWriter: writing {} cues → Seq {}  '{}'  (pre_roll={:.1f}s)",
+            len(cues), sequence_id, sequence_name, pre_roll_s,
         )
         self._cmd("Clear")
 
@@ -147,23 +148,20 @@ class ShowWriter:
             # Short gap so MA3 indexes the cue before we set properties.
             await asyncio.sleep(self._cue_gap)
 
-            # ---- set trigger type ----
+            # ---- set trigger type (all cues use Time trigger) ----
+            self._cmd(
+                f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
+                f' Property "TrigType" "Time"'
+            )
             if idx == 0:
-                # First cue: wait for a manual Go+ before advancing.
-                self._cmd(
-                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
-                    f' Property "TrigType" "Go"'
-                )
+                # First cue fires pre_roll_s after Go+
+                trig_time = pre_roll_s
             else:
-                time_since_last = cue.time_s - prev_time_s
-                self._cmd(
-                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
-                    f' Property "TrigType" "Time"'
-                )
-                self._cmd(
-                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
-                    f' Property "TrigTime" {time_since_last:.2f}'
-                )
+                trig_time = cue.time_s - prev_time_s
+            self._cmd(
+                f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
+                f' Property "TrigTime" {trig_time:.2f}'
+            )
 
             self._cmd("Clear")
             prev_time_s = cue.time_s
@@ -189,25 +187,44 @@ class ShowWriter:
         self,
         sequence_id: int = 1,
         audio_path: Path | None = None,
+        pre_roll_s: float | None = None,
     ) -> None:
-        """Fire ``Go+ Sequence N`` and start audio simultaneously.
+        """Fire ``Go+ Sequence N``, wait pre-roll, then start audio.
 
-        Sends ``Go+ Sequence {sequence_id}`` to trigger the first cue, then
-        starts audio playback back-to-back (<1 ms apart).  MA3 advances
-        through all subsequent cues automatically via their Time-Trigger
-        values — no further OSC is needed during playback.
+        Pre-roll timing
+        ---------------
+        1. Clear programmer + park at cue 1.
+        2. Send ``Go+ Sequence N`` — MA3 clock starts.
+        3. Sleep *pre_roll_s* seconds (MA3 runs silently, preparing for cue 1).
+        4. Start audio playback — arrives in sync with MA3 cue 1.
 
-        If *audio_path* is provided this method blocks until the track ends.
-        Without audio it fires ``Go+`` and returns immediately.
+        MA3 advances through all subsequent cues automatically via their
+        Time-Trigger values — no further OSC is needed during playback.
 
         Parameters
         ----------
         sequence_id:
             The MA3 sequence to start.
         audio_path:
-            Optional WAV/AIFF file to play in sync with the sequence.
+            Optional WAV/AIFF file to play after the pre-roll.
+            Blocks until the track finishes.
+        pre_roll_s:
+            Lead-in seconds between Go+ and audio start.  Must match
+            the TrigTime set on cue 1 by :meth:`write_show`.
+            Defaults to ``settings.pre_roll_seconds``.
         """
-        logger.info("ShowWriter: starting Seq {}", sequence_id)
+        if pre_roll_s is None:
+            pre_roll_s = float(self._s.pre_roll_seconds)
+
+        logger.info(
+            "ShowWriter: starting Seq {}  (pre_roll={:.1f}s)", sequence_id, pre_roll_s
+        )
+
+        # ---- clear + reset to cue 1 ----
+        self._client.send_command("ClearAll")
+        time.sleep(0.3)
+        self._client.send_command(f"Goto Cue 1 Sequence {sequence_id}")
+        time.sleep(0.3)
 
         if audio_path is not None:
             import sounddevice as sd
@@ -232,27 +249,24 @@ class ShowWriter:
                 target=_play, daemon=True, name="AudioPlayback"
             )
 
-            # ---- clear + reset to cue 1 before firing ----
-            self._client.send_command("ClearAll")
-            time.sleep(0.3)
-            self._client.send_command(f"Goto Cue 1 Sequence {sequence_id}")
-            time.sleep(0.3)
-
-            logger.info(
-                "Firing Go+ Seq {} and audio ({:.1f} s) simultaneously …",
-                sequence_id, duration_s,
-            )
-            # Fire OSC first, then start audio thread (<1 ms later).
+            # Fire Go+ — MA3 clock starts now
             self._client.send_command(f"Go+ Sequence {sequence_id}")
-            audio_thread.start()
+            logger.info(
+                "Go+ fired.  Waiting {:.1f}s pre-roll before audio …",
+                pre_roll_s,
+            )
 
-            done.wait(timeout=duration_s + 10.0)
+            # Pre-roll: MA3 runs silently, cue 1 fires at t=pre_roll_s
+            time.sleep(pre_roll_s)
+
+            # Audio starts simultaneously with MA3 cue 1
+            audio_thread.start()
+            logger.info("Audio started ({:.1f} s).", duration_s)
+
+            done.wait(timeout=duration_s + pre_roll_s + 10.0)
             logger.info("ShowWriter: playback complete.")
 
         else:
-            self._client.send_command("ClearAll")
-            time.sleep(0.3)
-            self._client.send_command(f"Goto Cue 1 Sequence {sequence_id}")
-            time.sleep(0.3)
+            # No audio: just start the sequence and return
             self._client.send_command(f"Go+ Sequence {sequence_id}")
-            logger.info("ShowWriter: Seq {} started (no audio).", sequence_id)
+            logger.info("ShowWriter: Seq {} started (no audio, pre_roll not waited).", sequence_id)

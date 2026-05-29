@@ -1,4 +1,4 @@
-"""MLI-OSC-Bridge CLI — seven commands.
+"""MLI-OSC-Bridge CLI — eight commands.
 
     mli-bridge test-connection   Verify grandMA3 is reachable via OSC
     mli-bridge setup-show        Init MA3 groups / presets / sequence
@@ -8,6 +8,7 @@
     mli-bridge list-devices      List available audio output devices
     mli-bridge play-show         Fire Go+ Sequence + audio simultaneously
     mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
+    mli-bridge read-patch        Auto-read MA3 fixture patch via TCP terminal
 """
 from __future__ import annotations
 
@@ -394,6 +395,121 @@ def cmd_grid_to_ma3(
             console.print("[green]✓ Playback complete.[/green]")
     else:
         console.print("[yellow]Dry run complete — no OSC sent.[/yellow]")
+
+
+@app.command("read-patch")
+def cmd_read_patch(
+    output: Path = typer.Option(
+        Path("patch.yaml"),
+        "--output", "-o",
+        help="Output YAML file path",
+    ),
+    host: str = typer.Option(
+        "",
+        "--host",
+        help="MA3 IP address (default: from MA3_HOST env / .env)",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print detected fixtures without writing YAML",
+    ),
+) -> None:
+    """Read the fixture patch from grandMA3 and generate patch.yaml automatically.
+
+    Connects to the MA3 TCP terminal (port 30000), runs ``List Fixture``,
+    parses 3D positions and groups fixtures by height:
+
+    \\b
+      z < 1 m    → Floor group (par)
+      1 ≤ z < 4  → Mid group  (spot)
+      z ≥ 4 m    → Truss group (wash)
+
+    \\b
+    Prerequisites: Enable the MA3 terminal in
+    Menu → Settings → Network → Remote Control → Enable Terminal.
+
+    \\b
+    Examples:
+        mli-bridge read-patch
+        mli-bridge read-patch --output my_stage.yaml
+        mli-bridge read-patch --dry-run
+    """
+    from mli_bridge.patch_reader.ma3_patch_reader import MA3PatchReader
+    from mli_bridge.settings import get_settings
+
+    settings = get_settings()
+    ma3_host = host or settings.ma3_host
+
+    console.print(
+        f"[bold]Reading MA3 patch from[/bold] [cyan]{ma3_host}:30000[/cyan] …"
+    )
+
+    reader = MA3PatchReader(host=ma3_host)
+
+    try:
+        fixtures = asyncio.run(reader.read_patch())
+    except ConnectionRefusedError:
+        console.print(
+            f"[red]✗ Connection refused at {ma3_host}:30000.[/red]\n"
+            "[dim]Enable the terminal in MA3: "
+            "Menu → Settings → Network → Enable Terminal[/dim]"
+        )
+        raise typer.Exit(code=1)
+    except TimeoutError:
+        console.print(
+            f"[red]✗ Timeout connecting to {ma3_host}:30000.[/red]"
+        )
+        raise typer.Exit(code=1)
+
+    if not fixtures:
+        console.print("[red]No fixtures found. Check MA3 patch is populated.[/red]")
+        raise typer.Exit(code=1)
+
+    # Show what was found
+    table = Table(title=f"Fixtures from MA3 at {ma3_host}")
+    table.add_column("ID",   style="dim",  width=5)
+    table.add_column("Name", style="cyan")
+    table.add_column("X",    width=8)
+    table.add_column("Y",    width=8)
+    table.add_column("Z",    width=8)
+    table.add_column("Type", style="magenta")
+    for fx in fixtures:
+        table.add_row(
+            str(fx["id"]), fx["name"],
+            f'{fx["x_m"]:.2f}m', f'{fx["y_m"]:.2f}m', f'{fx["z_m"]:.2f}m',
+            fx["fixture_type"],
+        )
+    console.print(table)
+
+    if dry_run:
+        console.print("[yellow]--dry-run: YAML not written.[/yellow]")
+        return
+
+    try:
+        data = asyncio.run(reader.generate_patch_yaml(output))
+    except RuntimeError as exc:
+        console.print(f"[red]✗ {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    result_table = Table(title="Generated patch")
+    result_table.add_column("Property", style="cyan")
+    result_table.add_column("Value",    style="green")
+    result_table.add_row("Fixtures", str(len(fixtures)))
+    result_table.add_row("Groups",   str(len(data["groups"])))
+    result_table.add_row("Stage width",  f'{data["stage"]["width_m"]:.1f} m')
+    result_table.add_row("Stage depth",  f'{data["stage"]["depth_m"]:.1f} m')
+    result_table.add_row("Stage height", f'{data["stage"]["height_m"]:.1f} m')
+    for g in data["groups"]:
+        result_table.add_row(
+            f'Group: {g["label"]}',
+            f'{len(g["fixtures"])} fixtures  type={g["fixture_type"]}',
+        )
+    console.print(result_table)
+
+    console.print(f"[green]✓ {output} written.[/green]")
+    console.print(
+        "[dim]Next: uv run mli-bridge grid-to-ma3 grid.npz patch.yaml[/dim]"
+    )
 
 
 if __name__ == "__main__":
