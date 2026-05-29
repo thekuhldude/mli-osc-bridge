@@ -1,4 +1,4 @@
-"""MLI-OSC-Bridge CLI — six commands.
+"""MLI-OSC-Bridge CLI — seven commands.
 
     mli-bridge test-connection   Verify grandMA3 is reachable via OSC
     mli-bridge setup-show        Init MA3 groups / presets / sequence
@@ -6,6 +6,7 @@
     mli-bridge play              Analyse + play + send OSC in real time
     mli-bridge preview           Print the first N events without sending OSC
     mli-bridge list-devices      List available audio output devices
+    mli-bridge play-timecode     Start MA3 internal timecode + audio together
     mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
 """
 from __future__ import annotations
@@ -233,6 +234,55 @@ def cmd_list_devices() -> None:
 
     console.print(table)
     console.print("[dim]Set AUDIO_DEVICE=<name> in .env to select a device.[/dim]")
+
+
+@app.command("play-timecode")
+def cmd_play_timecode(
+    wav: Path = typer.Argument(..., help="Path to WAV file", exists=True),
+    sequence_id: int = typer.Option(1, "--seq", "-s", help="MA3 sequence number"),
+    tc_slot: int = typer.Option(1, "--tc-slot", help="MA3 timecode slot number"),
+) -> None:
+    """Start MA3 internal timecode and audio playback simultaneously.
+
+    Assumes the MA3 sequence has already been programmed with per-cue
+    timecode triggers (e.g. via ``grid-to-ma3``).  This command:
+
+    \\b
+    1. Sets timecode slot to Internal clock.
+    2. Binds the sequence to that slot.
+    3. Fires ``Go+ TimecodeSlot`` and starts audio playback back-to-back
+       (<1 ms apart) so MA3 and audio stay in sync.
+    4. Blocks until the audio track finishes.
+
+    \\b
+    Example:
+        mli-bridge play-timecode song.wav
+        mli-bridge play-timecode song.wav --seq 2 --tc-slot 2
+    """
+    from mli_bridge.mapper.show_writer import ShowWriter
+
+    client, settings = _make_client()
+    writer = ShowWriter(client, settings)
+
+    console.print(
+        f"[bold]Timecode playback[/bold]  "
+        f"audio=[cyan]{wav.name}[/cyan]  "
+        f"Seq=[green]{sequence_id}[/green]  "
+        f"slot=[green]{tc_slot}[/green]"
+    )
+    console.print(
+        f"[dim]→ {settings.ma3_host}:{settings.ma3_port}[/dim]"
+    )
+
+    try:
+        writer.start_timecode_playback(
+            sequence_id=sequence_id,
+            timecode_slot=tc_slot,
+            audio_path=wav,
+        )
+        console.print("[green]✓ Playback complete.[/green]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Interrupted.[/yellow]")
 
 
 @app.command("grid-to-ma3")
