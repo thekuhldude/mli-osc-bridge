@@ -12,10 +12,15 @@ For each cue:
    — MA3 requires separate /cmd calls; semicolon-chained commands
    silently drop Attribute changes.
 5. Repeat steps 1-4 for every fixture.
-6. ``Store Seq <id> Cue <n>.000``        — stores cue content
-7. ``Store Sequence <id> Cue <n>.0      — attaches timecode trigger
-      Timecode <slot> At HH:MM:SS.FF``
+6. ``Store Seq <id> Cue <n>.000 /NoConfirm``     — stores cue content
+7. ``Store Sequence <id> Cue <n>.0               — attaches timecode trigger
+      Timecode <slot> At HH:MM:SS.FF /NoConfirm``
 8. ``Clear``
+
+Before the first cue, two preference commands suppress the interactive
+Store confirmation dialog for the duration of the write:
+  ``Set Preference "StoreMode" "CueOnly"``
+  ``Set Preference "StoreAskForMode" "Never"``
 
 After all cues are written the sequence is labelled and cued up at cue 1.
 
@@ -153,6 +158,11 @@ class ShowWriter:
         )
         self._cmd("Clear")   # start with a clean programmer
 
+        # Disable the interactive Store confirmation dialog so every
+        # Store command runs silently without waiting for user input.
+        self._cmd('Set Preference "StoreMode" "CueOnly"')
+        self._cmd('Set Preference "StoreAskForMode" "Never"')
+
         total = len(cues)
         for idx, cue in enumerate(cues):
             logger.debug(
@@ -174,14 +184,16 @@ class ShowWriter:
                 self._cmd(f'Attribute "ColorRGB_B" At {b}')
 
             # ---- store cue content ----
-            self._cmd(f"Store Seq {sequence_id} Cue {cue.cue_number:.3f}")
+            self._cmd(
+                f"Store Seq {sequence_id} Cue {cue.cue_number:.3f} /NoConfirm"
+            )
             time.sleep(self._cue_gap)
 
             # ---- attach timecode trigger ----
             tc = _format_timecode(cue.time_s, self._tc_fps)
             self._cmd(
                 f"Store Sequence {sequence_id} Cue {cue.cue_number:.1f}"
-                f" Timecode {tc_slot} At {tc}"
+                f" Timecode {tc_slot} At {tc} /NoConfirm"
             )
 
             self._cmd("Clear")
