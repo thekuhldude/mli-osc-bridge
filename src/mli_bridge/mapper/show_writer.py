@@ -174,7 +174,10 @@ class ShowWriter:
 
         # ---- finalise sequence ----
         self._cmd(f'Label Seq {sequence_id} "{sequence_name}"')
-        self._cmd(f"Goto Seq {sequence_id} Cue 1.000")
+        # Clear programmer and park the sequence at cue 1 so it is
+        # ready for an immediate Go+ without any residual programmer state.
+        self._cmd("ClearAll")
+        self._cmd(f"Goto Cue 1 Sequence {sequence_id}")
         logger.info(
             "ShowWriter: Seq {} '{}' ready ({} cues, Time-Trigger).",
             sequence_id, sequence_name, total,
@@ -229,6 +232,12 @@ class ShowWriter:
                 target=_play, daemon=True, name="AudioPlayback"
             )
 
+            # ---- clear + reset to cue 1 before firing ----
+            self._client.send_command("ClearAll")
+            time.sleep(0.3)
+            self._client.send_command(f"Goto Cue 1 Sequence {sequence_id}")
+            time.sleep(0.3)
+
             logger.info(
                 "Firing Go+ Seq {} and audio ({:.1f} s) simultaneously …",
                 sequence_id, duration_s,
@@ -241,5 +250,9 @@ class ShowWriter:
             logger.info("ShowWriter: playback complete.")
 
         else:
-            self._cmd(f"Go+ Sequence {sequence_id}")
+            self._client.send_command("ClearAll")
+            time.sleep(0.3)
+            self._client.send_command(f"Goto Cue 1 Sequence {sequence_id}")
+            time.sleep(0.3)
+            self._client.send_command(f"Go+ Sequence {sequence_id}")
             logger.info("ShowWriter: Seq {} started (no audio).", sequence_id)
