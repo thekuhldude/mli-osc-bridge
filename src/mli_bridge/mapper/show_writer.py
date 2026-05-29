@@ -12,11 +12,11 @@ For each cue:
    — MA3 requires separate /cmd calls; semicolon-chained commands
    silently drop Attribute changes.
 5. Repeat steps 1-4 for every fixture.
-6. ``Store Sequence <id> Cue <n>.0 /NoConfirmation``   — stores cue content
-   50 ms gap
-7. ``Store Sequence <id> Cue <n>.0                    — attaches timecode trigger
-      Timecode <slot> At HH:MM:SS.FF /NoConfirmation``
-   (separate command: combining store + timecode in one call silently fails)
+6. ``Store Sequence <id> Cue <n>.0 /NoConfirmation``   — store content
+7. Set trigger type:
+     Cue 1   → TrigType "Go"    (waits for a manual Go+ before playing)
+     Cue 2-N → TrigType "Time", TrigTime = seconds since previous cue
+               (MA3 advances automatically, no OSC needed during playback)
 8. ``Clear``
 
 Before the first cue, two preference commands suppress the interactive
@@ -26,21 +26,16 @@ Store confirmation dialog for the duration of the write:
 
 After all cues are written the sequence is labelled and cued up at cue 1.
 
-Timecode playback
------------------
-After writing, ``start_timecode_playback()`` configures MA3's internal
-timecode clock and (optionally) starts audio playback simultaneously.
-MA3 then fires cues automatically when the timecode clock reaches each
-cue's stored timecode value — no further OSC commands are needed during
-playback.
+Playback
+--------
+After writing, ``start_playback()`` fires ``Go+ Sequence N`` and
+(optionally) starts audio simultaneously so the first cue triggers and
+MA3 advances through the rest automatically.
 
 Timing note
 -----------
 MA3 processes /cmd packets at ~30 msg/s safely.  ``cmd_gap_s=0.025``
 (25 ms) gives ~40 msg/s — fine for offline programming.
-
-Rate estimate per cue (4 fixtures × 4 cmds + 3 store/tc/clear):
-    4 × 4 × 25 ms + 3 × 25 ms + 100 ms cue_gap ≈ 0.55 s per cue.
 """
 from __future__ import annotations
 
@@ -56,37 +51,6 @@ from mli_bridge.osc.client import MA3OscClient
 from mli_bridge.settings import BridgeSettings
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _format_timecode(time_s: float, fps: int = 30) -> str:
-    """Format *time_s* as ``HH:MM:SS.FF`` SMPTE timecode.
-
-    Parameters
-    ----------
-    time_s:
-        Position in seconds.
-    fps:
-        Frames per second (must match the MA3 timecode slot frame rate).
-
-    Returns
-    -------
-    str
-        e.g. ``"00:01:23.15"`` for 83.5 s at 30 fps.
-    """
-    total_frames = int(time_s * fps)
-    hh = total_frames // (fps * 3600)
-    mm = (total_frames % (fps * 3600)) // (fps * 60)
-    ss = (total_frames % (fps * 60)) // fps
-    ff = total_frames % fps
-    return f"{hh:02d}:{mm:02d}:{ss:02d}.{ff:02d}"
-
-
-# ---------------------------------------------------------------------------
-# ShowWriter
-# ---------------------------------------------------------------------------
-
 class ShowWriter:
     """Write a :class:`~mli_bridge.mapper.cue_builder.MA3Cue` list to grandMA3.
 
@@ -100,11 +64,8 @@ class ShowWriter:
         Pause between consecutive MA3 commands (seconds).
         25 ms is the safe minimum for Attribute processing.
     cue_gap_s:
-        Extra pause after storing each cue before clearing and starting
-        the next one.  100 ms gives MA3 time to index the new cue.
-    tc_fps:
-        Frame rate used when formatting timecode values.
-        Should match the grid video FPS (default 30).
+        Extra pause after storing each cue before setting trigger
+        properties.  50 ms gives MA3 time to index the new cue.
     """
 
     def __init__(
@@ -112,14 +73,12 @@ class ShowWriter:
         client: MA3OscClient,
         settings: BridgeSettings,
         cmd_gap_s: float = 0.025,
-        cue_gap_s: float = 0.100,
-        tc_fps: int = 30,
+        cue_gap_s: float = 0.050,
     ) -> None:
         self._client = client
         self._s = settings
         self._cmd_gap = cmd_gap_s
         self._cue_gap = cue_gap_s
-        self._tc_fps = tc_fps
 
     # ----------------------------------------------------------------- helpers
 
@@ -135,37 +94,35 @@ class ShowWriter:
         cues: list[MA3Cue],
         sequence_id: int = 1,
         sequence_name: str = "MLI_Show",
-        tc_slot: int = 1,
     ) -> None:
         """Program all cues into MA3 sequence *sequence_id*.
 
-        Each cue is stored with its content (RGB + brightness) **and** a
-        timecode trigger so MA3 can fire it automatically when the timecode
-        clock reaches the stored timestamp.
+        Cue 1 is set to **Go** trigger (waits for a manual start).
+        Cues 2-N are set to **Time** trigger so MA3 advances through them
+        automatically once playback begins — no further OSC is needed.
 
         Parameters
         ----------
         cues:
             Ordered list of :class:`~mli_bridge.mapper.cue_builder.MA3Cue`.
         sequence_id:
-            MA3 sequence number (``Store Seq <id> Cue N``).
+            MA3 sequence number.
         sequence_name:
             Label applied after all cues are stored.
-        tc_slot:
-            MA3 timecode slot number used for the trigger assignments.
         """
         logger.info(
-            "ShowWriter: writing {} cues → Seq {} '{}' (tc_slot={}, fps={})",
-            len(cues), sequence_id, sequence_name, tc_slot, self._tc_fps,
+            "ShowWriter: writing {} cues → Seq {}  '{}'",
+            len(cues), sequence_id, sequence_name,
         )
-        self._cmd("Clear")   # start with a clean programmer
+        self._cmd("Clear")
 
-        # Disable the interactive Store confirmation dialog so every
-        # Store command runs silently without waiting for user input.
+        # Suppress the interactive Store confirmation dialog.
         self._cmd('Set Preference "StoreMode" "CueOnly"')
         self._cmd('Set Preference "StoreAskForMode" "Never"')
 
         total = len(cues)
+        prev_time_s = 0.0
+
         for idx, cue in enumerate(cues):
             logger.debug(
                 "[{}/{}] Cue {:>6.3f}  t={:.2f}s  fade={:.2f}s",
@@ -177,35 +134,41 @@ class ShowWriter:
                 r, g, b = cue.fixture_colors[fid]
                 brightness = cue.fixture_brightness.get(fid, 1.0)
                 pct = max(0, min(100, int(round(brightness * 100))))
-
-                # Select + dimmer
                 self._cmd(f"Fixture {fid} At {pct}")
-                # Colour channels (each as a separate /cmd)
                 self._cmd(f'Attribute "ColorRGB_R" At {r}')
                 self._cmd(f'Attribute "ColorRGB_G" At {g}')
                 self._cmd(f'Attribute "ColorRGB_B" At {b}')
 
-            # ---- store cue content ----
-            # Use the full "Sequence" keyword (not "Seq") and /NoConfirmation
-            # to reliably suppress the confirmation dialog.
+            # ---- store cue ----
             self._cmd(
                 f"Store Sequence {sequence_id} Cue {cue.cue_number:.1f}"
                 f" /NoConfirmation"
             )
-            # MA3 needs a short gap between storing the cue and attaching
-            # the timecode trigger — a combined single command silently fails.
-            await asyncio.sleep(0.05)
+            # Short gap so MA3 indexes the cue before we set properties.
+            await asyncio.sleep(self._cue_gap)
 
-            # ---- attach timecode trigger (separate command) ----
-            tc = _format_timecode(cue.time_s, self._tc_fps)
-            self._cmd(
-                f"Store Sequence {sequence_id} Cue {cue.cue_number:.1f}"
-                f" Timecode {tc_slot} At {tc} /NoConfirmation"
-            )
+            # ---- set trigger type ----
+            if idx == 0:
+                # First cue: wait for a manual Go+ before advancing.
+                self._cmd(
+                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
+                    f' Property "TrigType" "Go"'
+                )
+            else:
+                time_since_last = cue.time_s - prev_time_s
+                self._cmd(
+                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
+                    f' Property "TrigType" "Time"'
+                )
+                self._cmd(
+                    f'Set Cue {cue.cue_number:.1f} Sequence {sequence_id}'
+                    f' Property "TrigTime" {time_since_last:.2f}'
+                )
 
             self._cmd("Clear")
+            prev_time_s = cue.time_s
 
-            # Yield to event loop every 10 cues so progress updates can print
+            # Yield to event loop every 10 cues so progress can print.
             if idx % 10 == 9:
                 await asyncio.sleep(0)
 
@@ -213,65 +176,45 @@ class ShowWriter:
         self._cmd(f'Label Seq {sequence_id} "{sequence_name}"')
         self._cmd(f"Goto Seq {sequence_id} Cue 1.000")
         logger.info(
-            "ShowWriter: Seq {} '{}' ready ({} cues, timecode slot {}).",
-            sequence_id, sequence_name, total, tc_slot,
+            "ShowWriter: Seq {} '{}' ready ({} cues, Time-Trigger).",
+            sequence_id, sequence_name, total,
         )
 
-    # -------------------------------------------------------- timecode playback
+    # ---------------------------------------------------------------- playback
 
-    def start_timecode_playback(
+    def start_playback(
         self,
         sequence_id: int = 1,
-        timecode_slot: int = 1,
         audio_path: Path | None = None,
     ) -> None:
-        """Configure MA3 timecode and start playback.
+        """Fire ``Go+ Sequence N`` and start audio simultaneously.
 
-        Steps
-        -----
-        1. Set timecode slot to **Internal** clock (MA3 drives its own clock).
-        2. Bind *sequence_id* to the timecode slot so MA3 fires cues
-           automatically when the clock reaches each stored timestamp.
-        3. If *audio_path* is provided:
+        Sends ``Go+ Sequence {sequence_id}`` to trigger the first cue, then
+        starts audio playback back-to-back (<1 ms apart).  MA3 advances
+        through all subsequent cues automatically via their Time-Trigger
+        values — no further OSC is needed during playback.
 
-           a. Pre-load audio into memory (eliminates disk-seek latency at
-              start time).
-           b. Start the MA3 timecode clock and audio playback **simultaneously**
-              (OSC send + thread.start() back-to-back, <1 ms apart).
-           c. Block until audio finishes.
-
-        4. If no *audio_path*: just send ``Go+ TimecodeSlot`` and return.
+        If *audio_path* is provided this method blocks until the track ends.
+        Without audio it fires ``Go+`` and returns immediately.
 
         Parameters
         ----------
         sequence_id:
-            The MA3 sequence that was programmed with timecode triggers.
-        timecode_slot:
-            MA3 timecode slot to use (must match the slot used in
-            :meth:`write_show`).
+            The MA3 sequence to start.
         audio_path:
-            Optional WAV/AIFF file to play in sync with the timecode clock.
-            When provided this method blocks until playback is complete.
+            Optional WAV/AIFF file to play in sync with the sequence.
         """
-        logger.info(
-            "ShowWriter: configuring timecode slot {} for Seq {}",
-            timecode_slot, sequence_id,
-        )
-
-        # ---- 1. Internal clock ----
-        self._cmd(f"Assign TimecodeSlot {timecode_slot} /Type Internal")
-
-        # ---- 2. Bind sequence to slot ----
-        self._cmd(f"Assign Sequence {sequence_id} /TimecodeSlot {timecode_slot}")
+        logger.info("ShowWriter: starting Seq {}", sequence_id)
 
         if audio_path is not None:
-            # ---- 3a. Pre-load audio ----
             import sounddevice as sd
             import soundfile as sf
 
             audio_path = Path(audio_path)
             logger.info("Loading audio from {} …", audio_path)
-            data, samplerate = sf.read(str(audio_path), dtype="float32", always_2d=True)
+            data, samplerate = sf.read(
+                str(audio_path), dtype="float32", always_2d=True
+            )
             device = self._s.audio_device
             duration_s = len(data) / samplerate
 
@@ -286,21 +229,17 @@ class ShowWriter:
                 target=_play, daemon=True, name="AudioPlayback"
             )
 
-            # ---- 3b. Fire timecode + audio together ----
             logger.info(
-                "Starting timecode slot {} and audio ({:.1f} s) simultaneously …",
-                timecode_slot, duration_s,
+                "Firing Go+ Seq {} and audio ({:.1f} s) simultaneously …",
+                sequence_id, duration_s,
             )
-            self._client.send_command(f"Go+ TimecodeSlot {timecode_slot}")
-            audio_thread.start()   # starts immediately after OSC send (<1 ms)
+            # Fire OSC first, then start audio thread (<1 ms later).
+            self._client.send_command(f"Go+ Sequence {sequence_id}")
+            audio_thread.start()
 
-            # ---- 3c. Block until done ----
             done.wait(timeout=duration_s + 10.0)
-            logger.info("ShowWriter: audio + timecode playback complete.")
+            logger.info("ShowWriter: playback complete.")
 
         else:
-            # ---- No audio: just start the clock ----
-            self._cmd(f"Go+ TimecodeSlot {timecode_slot}")
-            logger.info(
-                "ShowWriter: timecode slot {} started (no audio).", timecode_slot
-            )
+            self._cmd(f"Go+ Sequence {sequence_id}")
+            logger.info("ShowWriter: Seq {} started (no audio).", sequence_id)

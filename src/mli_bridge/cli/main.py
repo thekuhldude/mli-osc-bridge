@@ -6,7 +6,7 @@
     mli-bridge play              Analyse + play + send OSC in real time
     mli-bridge preview           Print the first N events without sending OSC
     mli-bridge list-devices      List available audio output devices
-    mli-bridge play-timecode     Start MA3 internal timecode + audio together
+    mli-bridge play-show         Fire Go+ Sequence + audio simultaneously
     mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
 """
 from __future__ import annotations
@@ -236,28 +236,26 @@ def cmd_list_devices() -> None:
     console.print("[dim]Set AUDIO_DEVICE=<name> in .env to select a device.[/dim]")
 
 
-@app.command("play-timecode")
-def cmd_play_timecode(
+@app.command("play-show")
+def cmd_play_show(
     wav: Path = typer.Argument(..., help="Path to WAV file", exists=True),
     sequence_id: int = typer.Option(1, "--seq", "-s", help="MA3 sequence number"),
-    tc_slot: int = typer.Option(1, "--tc-slot", help="MA3 timecode slot number"),
 ) -> None:
-    """Start MA3 internal timecode and audio playback simultaneously.
+    """Fire Go+ Sequence and audio playback simultaneously.
 
-    Assumes the MA3 sequence has already been programmed with per-cue
-    timecode triggers (e.g. via ``grid-to-ma3``).  This command:
+    Assumes the MA3 sequence has already been programmed with Time-Trigger
+    cues (e.g. via ``grid-to-ma3``).
 
     \\b
-    1. Sets timecode slot to Internal clock.
-    2. Binds the sequence to that slot.
-    3. Fires ``Go+ TimecodeSlot`` and starts audio playback back-to-back
-       (<1 ms apart) so MA3 and audio stay in sync.
+    1. Sends ``Go+ Sequence N`` to trigger the first cue.
+    2. Starts audio playback back-to-back (<1 ms apart).
+    3. MA3 advances through all cues automatically via Time-Trigger.
     4. Blocks until the audio track finishes.
 
     \\b
     Example:
-        mli-bridge play-timecode song.wav
-        mli-bridge play-timecode song.wav --seq 2 --tc-slot 2
+        mli-bridge play-show song.wav
+        mli-bridge play-show song.wav --seq 2
     """
     from mli_bridge.mapper.show_writer import ShowWriter
 
@@ -265,21 +263,14 @@ def cmd_play_timecode(
     writer = ShowWriter(client, settings)
 
     console.print(
-        f"[bold]Timecode playback[/bold]  "
+        f"[bold]Show playback[/bold]  "
         f"audio=[cyan]{wav.name}[/cyan]  "
-        f"Seq=[green]{sequence_id}[/green]  "
-        f"slot=[green]{tc_slot}[/green]"
+        f"Seq=[green]{sequence_id}[/green]"
     )
-    console.print(
-        f"[dim]→ {settings.ma3_host}:{settings.ma3_port}[/dim]"
-    )
+    console.print(f"[dim]→ {settings.ma3_host}:{settings.ma3_port}[/dim]")
 
     try:
-        writer.start_timecode_playback(
-            sequence_id=sequence_id,
-            timecode_slot=tc_slot,
-            audio_path=wav,
-        )
+        writer.start_playback(sequence_id=sequence_id, audio_path=wav)
         console.print("[green]✓ Playback complete.[/green]")
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted.[/yellow]")
@@ -311,17 +302,16 @@ def cmd_grid_to_ma3(
     rows: int = typer.Option(8, help="Grid row count (must match .npz)"),
     audio: Optional[Path] = typer.Option(
         None, "--audio", "-a",
-        help="WAV file for synchronized timecode playback (use with --play)",
+        help="WAV file to play immediately after writing (use with --play)",
         exists=True,
     ),
     play: bool = typer.Option(
         False, "--play", "-p",
         help=(
-            "Start MA3 timecode + audio playback immediately after writing. "
-            "MA3 fires cues automatically at the stored timecode positions."
+            "Fire Go+ Sequence + audio immediately after writing. "
+            "MA3 advances through cues automatically via Time-Trigger."
         ),
     ),
-    tc_slot: int = typer.Option(1, "--tc-slot", help="MA3 timecode slot number"),
     dry_run: bool = typer.Option(
         False, "--dry-run",
         help="Analyse and build cues but do not send OSC",
@@ -332,12 +322,13 @@ def cmd_grid_to_ma3(
     Reads the grid video produced by MLI-Rulegen, maps each fixture to a
     grid coordinate using 3D stage geometry from the patch YAML, extracts
     keyframes, builds MA3 cues and writes them all to grandMA3 via OSC.
-    Each cue is stored with a timecode trigger (HH:MM:SS.FF) so MA3 can
-    fire it automatically when the timecode clock reaches that position.
+    Cue 1 gets a Go-Trigger; cues 2-N get Time-Triggers so MA3 advances
+    automatically once playback starts.
 
     \\b
-    Write only:
-        mli-bridge grid-to-ma3 show.npz patch.yaml --seq 2 --name "Live Show"
+    Write only (start playback later with play-show):
+        mli-bridge grid-to-ma3 show.npz patch.yaml
+        mli-bridge play-show song.wav
 
     Write + play immediately:
         mli-bridge grid-to-ma3 show.npz patch.yaml --play --audio track.wav
@@ -356,14 +347,11 @@ def cmd_grid_to_ma3(
     if dry_run:
         console.print("[yellow]--dry-run: analysis only, no OSC will be sent.[/yellow]")
     if play and audio:
-        console.print(
-            f"[bold]Playback:[/bold] timecode slot [green]{tc_slot}[/green]  "
-            f"audio=[cyan]{audio.name}[/cyan]"
-        )
+        console.print(f"[bold]Playback:[/bold] audio=[cyan]{audio.name}[/cyan]")
     elif play:
         console.print(
-            f"[bold]Playback:[/bold] timecode slot [green]{tc_slot}[/green]  "
-            "[yellow](no audio — use --audio to sync a WAV)[/yellow]"
+            "[bold]Playback:[/bold] "
+            "[yellow](no audio — use --audio to start a WAV)[/yellow]"
         )
 
     pipeline = GridToMA3Pipeline(client, settings)
@@ -380,7 +368,6 @@ def cmd_grid_to_ma3(
             dry_run=dry_run,
             audio_path=audio,
             play_after_write=play,
-            timecode_slot=tc_slot,
         )
     )
 
@@ -395,17 +382,16 @@ def cmd_grid_to_ma3(
     table.add_row("Fixtures addressed", str(result.n_fixtures))
     table.add_row("Sequence", str(result.sequence_id))
     if not dry_run:
-        table.add_row("Timecode slot", str(tc_slot))
         table.add_row("Played", "yes" if result.played else "no")
 
     console.print(table)
     if not dry_run:
         console.print(
             f"[green]✓ Seq {result.sequence_id} '{sequence_name}' "
-            f"programmed with {result.n_cues} cues (timecode slot {tc_slot}).[/green]"
+            f"programmed with {result.n_cues} cues (Time-Trigger).[/green]"
         )
         if result.played:
-            console.print("[green]✓ Timecode playback complete.[/green]")
+            console.print("[green]✓ Playback complete.[/green]")
     else:
         console.print("[yellow]Dry run complete — no OSC sent.[/yellow]")
 
