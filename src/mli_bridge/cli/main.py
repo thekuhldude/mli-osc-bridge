@@ -1,4 +1,4 @@
-"""MLI-OSC-Bridge CLI — eight commands.
+"""MLI-OSC-Bridge CLI — nine commands.
 
     mli-bridge test-connection   Verify grandMA3 is reachable via OSC
     mli-bridge setup-show        Init MA3 groups / presets / sequence
@@ -9,6 +9,7 @@
     mli-bridge play-show         Fire Go+ Sequence + audio simultaneously
     mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
     mli-bridge read-patch        Auto-read MA3 fixture patch via TCP terminal
+    mli-bridge read-patch-file   Parse a saved "List Fixture" text file
 """
 from __future__ import annotations
 
@@ -496,6 +497,112 @@ def cmd_read_patch(
     result_table.add_column("Value",    style="green")
     result_table.add_row("Fixtures", str(len(fixtures)))
     result_table.add_row("Groups",   str(len(data["groups"])))
+    result_table.add_row("Stage width",  f'{data["stage"]["width_m"]:.1f} m')
+    result_table.add_row("Stage depth",  f'{data["stage"]["depth_m"]:.1f} m')
+    result_table.add_row("Stage height", f'{data["stage"]["height_m"]:.1f} m')
+    for g in data["groups"]:
+        result_table.add_row(
+            f'Group: {g["label"]}',
+            f'{len(g["fixtures"])} fixtures  type={g["fixture_type"]}',
+        )
+    console.print(result_table)
+
+    console.print(f"[green]✓ {output} written.[/green]")
+    console.print(
+        "[dim]Next: uv run mli-bridge grid-to-ma3 grid.npz patch.yaml[/dim]"
+    )
+
+
+@app.command("read-patch-file")
+def cmd_read_patch_file(
+    fixtures_file: Path = typer.Argument(
+        ...,
+        help='Path to a text file containing the MA3 "List Fixture" output',
+        exists=True,
+    ),
+    output: Path = typer.Option(
+        Path("patch.yaml"), "--output", "-o",
+        help="Output YAML file path",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Print detected fixtures without writing YAML",
+    ),
+) -> None:
+    r"""Parse a saved MA3 "List Fixture" text file and generate patch.yaml.
+
+    Works fully offline — no MA3 connection required.
+
+    \\b
+    How to get the input file:
+      1. In MA3, open the System Monitor.
+      2. Run:  List Fixture
+      3. Select all output text and save it to a .txt file.
+
+    \\b
+    The parser finds the header line (contains POSX / POSY / POSZ) and
+    uses character-column positions to extract fixture ID, name and
+    3D coordinates from every data row.
+
+    \\b
+    Fixtures are grouped by height:
+      z < 1 m    → Floor group (par)
+      1 ≤ z < 4  → Mid group  (spot)
+      z ≥ 4 m    → Truss group (wash)
+
+    \\b
+    Example:
+        mli-bridge read-patch-file fixtures.txt
+        mli-bridge read-patch-file fixtures.txt --output my_stage.yaml
+        mli-bridge read-patch-file fixtures.txt --dry-run
+    """
+    from mli_bridge.patch_reader.list_fixture_parser import (
+        parse_list_fixture_output,
+        generate_patch_yaml,
+    )
+
+    console.print(
+        f"[bold]Parsing List Fixture file[/bold]  [cyan]{fixtures_file.name}[/cyan]"
+    )
+
+    text = fixtures_file.read_text(encoding="utf-8", errors="replace")
+    fixtures = parse_list_fixture_output(text)
+
+    if not fixtures:
+        console.print(
+            "[red]No fixtures found in the file.[/red]\n"
+            "[dim]Make sure the file contains a header line with POSX / POSY / POSZ.[/dim]"
+        )
+        raise typer.Exit(code=1)
+
+    table = Table(title=f"Fixtures from {fixtures_file.name}")
+    table.add_column("ID",   style="dim",  width=5)
+    table.add_column("Name", style="cyan")
+    table.add_column("X",    width=9)
+    table.add_column("Y",    width=9)
+    table.add_column("Z",    width=9)
+    table.add_column("Type", style="magenta")
+    for fx in fixtures[:30]:
+        table.add_row(
+            str(fx["id"]), fx["name"],
+            f'{fx["x_m"]:.3f}m', f'{fx["y_m"]:.3f}m', f'{fx["z_m"]:.3f}m',
+            fx["fixture_type"],
+        )
+    if len(fixtures) > 30:
+        console.print(f"[dim]… showing first 30 of {len(fixtures)} fixtures[/dim]")
+    console.print(table)
+
+    if dry_run:
+        console.print("[yellow]--dry-run: YAML not written.[/yellow]")
+        return
+
+    data = generate_patch_yaml(fixtures, output, source=fixtures_file.name)
+
+    result_table = Table(title="Generated patch")
+    result_table.add_column("Property", style="cyan")
+    result_table.add_column("Value",    style="green")
+    result_table.add_row("Fixtures",     str(len(fixtures)))
+    result_table.add_row("Groups",       str(len(data["groups"])))
     result_table.add_row("Stage width",  f'{data["stage"]["width_m"]:.1f} m')
     result_table.add_row("Stage depth",  f'{data["stage"]["depth_m"]:.1f} m')
     result_table.add_row("Stage height", f'{data["stage"]["height_m"]:.1f} m')
