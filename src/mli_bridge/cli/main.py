@@ -1,4 +1,4 @@
-"""MLI-OSC-Bridge CLI — nine commands.
+"""MLI-OSC-Bridge CLI — ten commands.
 
     mli-bridge test-connection   Verify grandMA3 is reachable via OSC
     mli-bridge setup-show        Init MA3 groups / presets / sequence
@@ -10,6 +10,7 @@
     mli-bridge grid-to-ma3       Convert grid .npz to MA3 cue show (offline)
     mli-bridge read-patch        Auto-read MA3 fixture patch via TCP terminal
     mli-bridge read-patch-file   Parse a saved "List Fixture" text file
+    mli-bridge intent-to-show    Translate show-intent JSON to MA3 commands
 """
 from __future__ import annotations
 
@@ -617,6 +618,109 @@ def cmd_read_patch_file(
     console.print(
         "[dim]Next: uv run mli-bridge grid-to-ma3 grid.npz patch.yaml[/dim]"
     )
+
+
+@app.command("intent-to-show")
+def cmd_intent_to_show(
+    intent_file: Path = typer.Argument(
+        ..., help="Path to show-intent JSON file", exists=True,
+    ),
+    fixtures_file: Path = typer.Argument(
+        ..., help="Path to 'List Fixture' text file (from MA3 System Monitor)", exists=True,
+    ),
+    send: bool = typer.Option(
+        False, "--send", help="Send commands to grandMA3 via OSC after printing",
+    ),
+    sequence_id: int = typer.Option(1, "--seq", "-s", help="MA3 sequence number"),
+    pre_roll: float = typer.Option(2.0, "--pre-roll", help="Pre-roll seconds for cue 1"),
+) -> None:
+    """Translate a show-intent JSON into grandMA3 commands (dry-run or send).
+
+    \\b
+    The intent file describes what each fixture group should do at each cue.
+    The fixtures file is the 'List Fixture' output from the MA3 System Monitor,
+    used to build the 3×4 stage grid.
+
+    \\b
+    Example (dry-run — just print commands):
+        mli-bridge intent-to-show example_intent.json fixtures.txt
+
+    \\b
+    Example (send to MA3):
+        mli-bridge intent-to-show example_intent.json fixtures.txt --send
+    """
+    import json as _json
+    import time as _time
+
+    from mli_bridge.grid_groups import build_grid_from_fixtures
+    from mli_bridge.intent_schema import ShowIntent
+    from mli_bridge.intent_to_ma3 import translate_show
+    from mli_bridge.patch_reader.list_fixture_parser import parse_list_fixture_output
+
+    # ── load intent ────────────────────────────────────────────────────────
+    try:
+        intent_data = _json.loads(intent_file.read_text(encoding="utf-8"))
+        show = ShowIntent(**intent_data)
+    except Exception as exc:
+        console.print(f"[red]Failed to parse intent file: {exc}[/red]")
+        raise typer.Exit(1)
+
+    # ── load fixtures + build grid ─────────────────────────────────────────
+    fixtures_text = fixtures_file.read_text(encoding="utf-8", errors="replace")
+    fixtures      = parse_list_fixture_output(fixtures_text)
+    if not fixtures:
+        console.print("[red]No fixtures parsed from file.[/red]")
+        raise typer.Exit(1)
+
+    grid = build_grid_from_fixtures(fixtures)
+
+    # ── display grid ───────────────────────────────────────────────────────
+    grid_table = Table(title=f"Stage grid ({len(fixtures)} fixtures)")
+    grid_table.add_column("Row",  style="dim")
+    grid_table.add_column("Col 0", style="cyan")
+    grid_table.add_column("Col 1", style="cyan")
+    grid_table.add_column("Col 2", style="cyan")
+    grid_table.add_column("Col 3", style="cyan")
+    row_labels = {0: "Truss", 1: "Mid", 2: "Floor"}
+    for row in sorted(grid.keys()):
+        cols = grid[row]
+        grid_table.add_row(
+            row_labels.get(row, str(row)),
+            *[str(cols.get(c, "—")) for c in range(4)],
+        )
+    console.print(grid_table)
+
+    # ── translate ──────────────────────────────────────────────────────────
+    try:
+        commands = translate_show(show, grid, sequence_id=sequence_id, pre_roll_s=pre_roll)
+    except Exception as exc:
+        console.print(f"[red]Translation failed: {exc}[/red]")
+        raise typer.Exit(1)
+
+    # ── display commands ───────────────────────────────────────────────────
+    cmd_table = Table(title=f"MA3 commands ({len(commands)} total)")
+    cmd_table.add_column("#", style="dim", width=5)
+    cmd_table.add_column("Command")
+    for i, cmd in enumerate(commands, 1):
+        cmd_table.add_row(str(i), cmd)
+    console.print(cmd_table)
+
+    if not send:
+        console.print(
+            f"[dim]Dry-run complete.  Use --send to transmit to grandMA3.[/dim]"
+        )
+        return
+
+    # ── send ───────────────────────────────────────────────────────────────
+    client, settings = _make_client()
+    console.print(
+        f"[bold]Sending {len(commands)} commands → "
+        f"{settings.ma3_host}:{settings.ma3_port}[/bold]"
+    )
+    for cmd in commands:
+        client.send_command(cmd)
+        _time.sleep(0.025)   # 25 ms gap (same as show_writer.py)
+    console.print(f"[green]✓ Done — {len(show.cues)} cue(s) written to Seq {sequence_id}.[/green]")
 
 
 if __name__ == "__main__":

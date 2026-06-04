@@ -1,0 +1,47 @@
+{
+  "bpm": 120.0,
+  "cues": [
+    {
+      "cue_number": 1,
+      "start_s": 0.0,
+      "duration_s": 4.0,
+      "fade_s": 0.5,
+      "states": [
+        {"group": "truss", "intensity": 100, "color": "blue",  "effect": {"type": "none"}},
+        {"group": "floor", "intensity":  80, "color": "red",   "effect": {"type": "none"}},
+        {"group": "mid",   "intensity":  60, "color": "amber", "effect": {"type": "none"}}
+      ]
+    },
+    {
+      "cue_number": 2,
+      "start_s": 4.0,
+      "duration_s": 4.0,
+      "fade_s": 0.5,
+      "states": [
+        {"group": "all",   "intensity": 100, "color": "white",
+         "effect": {"type": "pulse", "speed": "1/4"}}
+      ]
+    },
+    {
+      "cue_number": 3,
+      "start_s": 8.0,
+      "duration_s": 4.0,
+      "fade_s": 0.0,
+      "states": [
+        {"group": "truss", "intensity": 100, "color": "cyan",
+         "effect": {"type": "strobe", "speed": "1/8"}},
+        {"group": "floor", "intensity":  40, "color": "off",   "effect": {"type": "none"}}
+      ]
+    },
+    {
+      "cue_number": 4,
+      "start_s": 12.0,
+      "duration_s": 8.0,
+      "fade_s": 1.0,
+      "states": [
+        {"group": "all",   "intensity":  80, "color": "magenta",
+         "effect": {"type": "chase", "speed": "1/4"}}
+      ]
+    }
+  ]
+}
