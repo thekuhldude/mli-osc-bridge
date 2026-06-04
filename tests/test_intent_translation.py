@@ -307,25 +307,29 @@ class TestTranslateCue:
         assert all("At 80" in c for c in on_cmds)
         assert all("At 0"  in c for c in off_cmds)
 
-    def test_pulse_rate_with_bpm(self):
+    def test_pulse_speed_command_with_bpm(self):
+        # 1/4 at 120 BPM → 120 * 4 = 480 phaser BPM
         _, grid = _simple_show()
-        # 60/120 * 0.25 = 0.125 s
         cue = CueIntent(
             cue_number=1, start_s=0.0, duration_s=4.0,
             states=[GroupState(group="all", intensity=100, color="white",
                                effect=Effect(type=EffectType.PULSE, speed="1/4"))],
         )
         cmds = translate_cue(cue, grid, bpm=120.0)
-        assert any("PhaseCycleTime" in c and "0.125" in c for c in cmds)
+        assert any("SpeedFromX" in c and "480" in c for c in cmds)
+        assert not any("PhaseCycleTime" in c for c in cmds)
 
-    def test_pulse_no_rate_without_bpm(self):
+    def test_pulse_speed_uses_default_bpm_when_none(self):
+        # No BPM supplied → falls back to 120 default → 1/4 = 480
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=1, start_s=0.0, duration_s=4.0,
             states=[GroupState(group="all", intensity=100, color="white",
                                effect=Effect(type=EffectType.PULSE, speed="1/4"))],
         )
-        assert not any("PhaseCycleTime" in c for c in translate_cue(cue, grid, bpm=None))
+        cmds = translate_cue(cue, grid, bpm=None)
+        assert any("SpeedFromX" in c for c in cmds)
+        assert not any("PhaseCycleTime" in c for c in cmds)
 
     # ── Strobe ────────────────────────────────────────────────────────────────
 
@@ -338,8 +342,8 @@ class TestTranslateCue:
         )
         assert "Step 2" in translate_cue(cue, grid)
 
-    def test_strobe_rate_faster_than_1_bar(self):
-        # 1/8 at 120bpm → 60/120 * 0.125 = 0.0625 s
+    def test_strobe_speed_faster_than_pulse(self):
+        # 1/8 at 120 BPM → 120 * 8 = 960 phaser BPM (faster than pulse at 1/4)
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=1, start_s=0.0, duration_s=4.0,
@@ -347,8 +351,8 @@ class TestTranslateCue:
                                effect=Effect(type=EffectType.STROBE, speed="1/8"))],
         )
         cmds = translate_cue(cue, grid, bpm=120.0)
-        rate_cmd = next(c for c in cmds if "PhaseCycleTime" in c)
-        assert float(rate_cmd.split()[-1]) < 0.1
+        speed_cmd = next(c for c in cmds if "SpeedFromX" in c)
+        assert float(speed_cmd.split()[-1]) >= 900   # 960 > pulse 480
 
     # ── Chase ─────────────────────────────────────────────────────────────────
 
@@ -361,7 +365,7 @@ class TestTranslateCue:
         )
         assert "Step 2" in translate_cue(cue, grid)
 
-    def test_chase_has_matricks_phase(self):
+    def test_chase_has_matricks_phase_selection_syntax(self):
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=1, start_s=0.0, duration_s=8.0,
@@ -369,10 +373,12 @@ class TestTranslateCue:
                                effect=Effect(type=EffectType.CHASE, speed="1/4"))],
         )
         cmds = translate_cue(cue, grid)
-        assert any("PhaseFrom" in c for c in cmds)
-        assert any("PhaseTo"   in c and "360" in c for c in cmds)
+        assert any("Set Selection MAtricks" in c and "PhaseFromX" in c for c in cmds)
+        assert any("Set Selection MAtricks" in c and "PhaseToX"   in c and "360" in c
+                   for c in cmds)
 
-    def test_chase_phase_0_to_360(self):
+    def test_chase_phase_uses_selection_not_pool_object(self):
+        """Must use 'Set Selection MAtricks', NOT 'Set MATricks 1'."""
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=2, start_s=4.0, duration_s=4.0,
@@ -380,13 +386,14 @@ class TestTranslateCue:
                                effect=Effect(type=EffectType.CHASE, speed="1/2"))],
         )
         cmds = translate_cue(cue, grid)
-        assert any('"PhaseFrom" 0'   in c for c in cmds)
-        assert any('"PhaseTo" 360'   in c for c in cmds)
+        assert not any("Set MATricks 1" in c for c in cmds)
+        assert any('"PhaseFromX" 0'   in c for c in cmds)
+        assert any('"PhaseToX"'       in c and "360" in c for c in cmds)
 
     # ── Programmer hygiene ────────────────────────────────────────────────────
 
-    def test_clear_after_every_effect_cue(self):
-        """Last command of every cue must be Clear — prevents step bleed."""
+    def test_clear_present_in_every_cue(self):
+        """Clear must appear in every cue's command list to prevent step bleed."""
         fixtures = _make_fixtures()
         grid     = build_grid_from_fixtures(fixtures)
         for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE, EffectType.NONE):
@@ -396,7 +403,32 @@ class TestTranslateCue:
                                    effect=Effect(type=etype, speed="1/4"))],
             )
             cmds = translate_cue(cue, grid)
-            assert cmds[-1] == "Clear", f"Last cmd for {etype} must be Clear"
+            assert "Clear" in cmds, f"Clear missing for {etype}"
+
+    def test_matricks_reset_after_phaser_cue(self):
+        """Phaser cues must emit MAtricks reset after Clear to prevent bleed."""
+        fixtures = _make_fixtures()
+        grid     = build_grid_from_fixtures(fixtures)
+        for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE):
+            cue = CueIntent(
+                cue_number=1, start_s=0.0, duration_s=4.0,
+                states=[GroupState(group="all", intensity=100, color="white",
+                                   effect=Effect(type=etype, speed="1/4"))],
+            )
+            cmds = translate_cue(cue, grid)
+            clear_idx = max(i for i, c in enumerate(cmds) if c == "Clear")
+            tail = cmds[clear_idx:]
+            assert any("PhaseFromX" in c for c in tail), f"No PhaseFromX reset after Clear for {etype}"
+            assert any("SpeedFromX" in c for c in tail), f"No SpeedFromX reset after Clear for {etype}"
+
+    def test_static_cue_ends_with_clear(self):
+        """Static cue has no phaser reset — last command is Clear."""
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=2.0,
+            states=[GroupState(group="mid", intensity=60, color="amber")],
+        )
+        assert translate_cue(cue, grid)[-1] == "Clear"
 
 
 class TestTranslateShow:
@@ -418,9 +450,13 @@ class TestTranslateShow:
         assert "ClearAll" in cmds
         assert "Goto Cue 1 Sequence 1" in cmds
 
-    def test_preferences_suppressed(self):
+    def test_no_illegal_preference_commands(self):
+        """'Set Preference StoreMode/StoreAskForMode' returned Illegal object in MA3."""
         show, grid = _simple_show()
-        assert any("StoreAskForMode" in c for c in translate_show(show, grid))
+        cmds = translate_show(show, grid)
+        assert not any("StoreMode"       in c for c in cmds)
+        assert not any("StoreAskForMode" in c for c in cmds)
+        assert not any("Set Preference"  in c for c in cmds)
 
     def test_all_cues_stored(self):
         show, grid = _simple_show()
@@ -428,7 +464,7 @@ class TestTranslateShow:
         assert any("Store Sequence 1 Cue 1.0" in c for c in cmds)
         assert any("Store Sequence 1 Cue 2.0" in c for c in cmds)
 
-    def test_bpm_propagates_to_rate_commands(self):
+    def test_bpm_propagates_to_speed_commands(self):
         fixtures = _make_fixtures()
         grid     = build_grid_from_fixtures(fixtures)
         show = ShowIntent(
@@ -439,7 +475,9 @@ class TestTranslateShow:
                                    effect=Effect(type=EffectType.PULSE, speed="1/4"))],
             )],
         )
-        assert any("PhaseCycleTime" in c for c in translate_show(show, grid))
+        cmds = translate_show(show, grid)
+        assert any("SpeedFromX" in c for c in cmds)
+        assert not any("PhaseCycleTime" in c for c in cmds)
 
     def test_command_count_reasonable(self):
         show, grid = _simple_show()

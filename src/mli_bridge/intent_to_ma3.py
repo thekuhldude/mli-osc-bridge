@@ -14,8 +14,8 @@ References
 ----------
 * https://help.malighting.com/grandMA3/2.0/HTML/phaser.html
 * https://help.malighting.com/grandMA3/2.0/HTML/phaser_create_dimmer.html
-* MATricks for phase distribution:
-  https://help2.malighting.com/Page/grandMA3/keyword_matricks/en/1.2
+* MAtricks for phase distribution:
+  https://help2.malighting.com/Page/grandMA3/keyword_MAtricks/en/1.9
 
 Effect implementations
 ----------------------
@@ -66,14 +66,17 @@ from mli_bridge.intent_schema import (
 DEFAULT_SEQUENCE_ID = 1
 PRE_ROLL_S          = 2.0   # seconds of MA3-only run-up before audio starts
 
-# Note-value fraction → float multiplier on one beat
-_SPEED_FRACTIONS: dict[str, float] = {
+# Note-value speed multiplier: faster subdivisions = more cycles/minute
+# "1/4" at 120 BPM = 480 cycles/minute (the phaser runs 4× per beat)
+_SPEED_MULTIPLIERS: dict[str, float] = {
     "1/1":  1.0,
-    "1/2":  0.5,
-    "1/4":  0.25,
-    "1/8":  0.125,
-    "1/16": 0.0625,
+    "1/2":  2.0,
+    "1/4":  4.0,
+    "1/8":  8.0,
+    "1/16": 16.0,
 }
+
+_DEFAULT_BPM = 120.0
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -87,40 +90,55 @@ def _resolve_color(color: str) -> tuple[int, int, int]:
     return COLOR_MAP[color]
 
 
-def _cycle_s(speed: str, bpm: float | None) -> float | None:
-    """Convert speed notation + BPM into a cycle time in seconds.
+def _phaser_bpm(speed: str, bpm: float | None) -> float:
+    """Convert speed notation + show BPM into phaser cycle BPM.
 
-    Returns ``None`` when BPM is unavailable (no rate command will be emitted).
+    MA3 MAtricks SpeedFromX/SpeedToX accept a BPM value directly.
+    Faster subdivisions produce more cycles per minute:
+        "1/4" at 120 show-BPM → 480 phaser BPM
+
+    Falls back to ``_DEFAULT_BPM`` when show BPM is unavailable.
+
+    Ref: https://help2.malighting.com/Page/grandMA3/keyword_MAtricks/en/1.9
+    IMPORTANT: if MA3 shows an unexpected speed, this value is the first
+    place to adjust.  One function, one number.
     """
-    if not bpm or bpm <= 0:
-        return None
-    frac = _SPEED_FRACTIONS.get(speed, 0.25)
-    return (60.0 / bpm) * frac
+    base = bpm if (bpm and bpm > 0) else _DEFAULT_BPM
+    mult = _SPEED_MULTIPLIERS.get(speed, 4.0)
+    return base * mult
 
 
-def _set_rate_commands(
-    cue_number: float,
-    sequence_id: int,
-    speed: str,
-    bpm: float | None,
-) -> list[str]:
-    """Post-store commands to apply the phaser cycle time to a cue.
+def _matricks_speed_commands(speed: str, bpm: float | None) -> list[str]:
+    """Programmer commands to set the phaser speed via MAtricks.
 
-    VERIFY: "PhaseCycleTime" is the property name in MA3 2.x.
-    One-stop function — change the property name here if MA3 uses a
-    different spelling.  Ref:
-    https://help.malighting.com/grandMA3/2.0/HTML/phaser_properties.html
+    Applied to the current Selection in the programmer (before Store).
+    Sets SpeedFromX = SpeedToX so the speed is uniform across all
+    fixtures rather than swept across a range.
+
+    Ref: https://help2.malighting.com/Page/grandMA3/keyword_MAtricks/en/1.9
     """
-    t = _cycle_s(speed, bpm)
-    if t is None:
-        logger.debug(
-            "No BPM set for cue {} — phaser rate not programmed (MA3 default).",
-            cue_number,
-        )
-        return []
+    pbpm = _phaser_bpm(speed, bpm)
+    logger.info(
+        "phaser speed: Effect.speed={!r}  show_bpm={}  → phaser_bpm={:.1f}",
+        speed, bpm, pbpm,
+    )
     return [
-        f'Set Cue {cue_number:.1f} Sequence {sequence_id}'
-        f' Property "PhaseCycleTime" {t:.3f}'
+        f'Set Selection MAtricks "SpeedFromX" {pbpm:.1f}',
+        f'Set Selection MAtricks "SpeedToX"   {pbpm:.1f}',
+    ]
+
+
+def _matricks_reset_commands() -> list[str]:
+    """Reset MAtricks phase and speed on the Selection after Clear.
+
+    Prevents phase/speed values from a chase cue bleeding into the next
+    cue's programmer state.
+    """
+    return [
+        'Set Selection MAtricks "PhaseFromX" 0',
+        'Set Selection MAtricks "PhaseToX"   0',
+        'Set Selection MAtricks "SpeedFromX" 0',
+        'Set Selection MAtricks "SpeedToX"   0',
     ]
 
 
@@ -246,12 +264,13 @@ def _fill_chase(gs: GroupState, grid: dict) -> list[str]:
     for fid in fixture_ids:
         cmds.append(f"Fixture {fid} At 0")
 
-    # ── MATricks phase distribution ───────────────────────────────────────────
+    # ── MAtricks phase distribution ───────────────────────────────────────────
     # Applied AFTER step 2 data, still in the programmer, before Store.
-    # This spreads the phaser starting phase 0°–360° across all selected
-    # fixtures so the chase cascades left-to-right.
-    cmds.append('Set MATricks 1 "PhaseFrom" 0')
-    cmds.append('Set MATricks 1 "PhaseTo" 360')
+    # Spreads the phaser start-phase 0°–360° across the Selection in
+    # programmer order (= resolve_group column order = left → right).
+    # Ref: https://help2.malighting.com/Page/grandMA3/keyword_MAtricks/en/1.9
+    cmds.append('Set Selection MAtricks "PhaseFromX" 0')
+    cmds.append('Set Selection MAtricks "PhaseToX"   360')
 
     return cmds
 
@@ -293,12 +312,14 @@ def translate_cue(
 
     Structure
     ---------
-    1. ``Clear``  — fresh programmer (no step bleed from prior cue)
-    2. For each GroupState: fill programmer steps + colour + MATricks.
-    3. ``Store Sequence … Cue … /NoConfirmation``
-    4. ``Set Cue … Property "TrigType" "Time"``
-    5. Post-store rate commands (one per effect state that has a BPM speed).
+    1. ``Clear``  — fresh programmer (no step bleed from prior cue).
+    2. For each GroupState: fill programmer steps + colour + MAtricks phase.
+    3. For each phaser state: apply MAtricks speed (before Store).
+    4. ``Store Sequence … Cue … /NoConfirmation``
+    5. ``Set Cue … Property "TrigType" "Time"``
     6. ``Clear``  — leave programmer clean for the next cue.
+    7. MAtricks reset — zero out phase/speed so they don't bleed into
+       the next cue's programmer context.
 
     Returns
     -------
@@ -307,8 +328,16 @@ def translate_cue(
     """
     cmds: list[str] = ["Clear"]
 
+    has_phaser = any(gs.effect.type != EffectType.NONE for gs in cue.states)
+
+    # Programme all group states
     for gs in cue.states:
         cmds.extend(_fill_group_state(gs, grid))
+
+    # Speed — set in programmer before Store via MAtricks SpeedFromX/ToX
+    for gs in cue.states:
+        if gs.effect.type != EffectType.NONE:
+            cmds.extend(_matricks_speed_commands(gs.effect.speed, bpm))
 
     # Store
     cmds.append(
@@ -321,13 +350,14 @@ def translate_cue(
         f' Property "TrigType" "Time"'
     )
 
-    # Rate commands (one per phaser state)
-    for gs in cue.states:
-        if gs.effect.type != EffectType.NONE:
-            cmds.extend(_set_rate_commands(cue.cue_number, sequence_id,
-                                           gs.effect.speed, bpm))
-
+    # Clear programmer (critical — prevents step bleed)
     cmds.append("Clear")
+
+    # MAtricks reset — always emit so phase/speed from a chase/pulse don't
+    # linger in the Selection's MAtricks context for the next cue
+    if has_phaser:
+        cmds.extend(_matricks_reset_commands())
+
     return cmds
 
 
@@ -356,11 +386,10 @@ def translate_show(
     sequence_id: MA3 sequence number (default 1).
     pre_roll_s:  Lead-in for cue 1 after Go+ (default 2.0 s).
     """
-    all_cmds: list[str] = [
-        'Set Preference "StoreMode" "CueOnly"',
-        'Set Preference "StoreAskForMode" "Never"',
-        "Clear",
-    ]
+    # Note: "Set Preference StoreMode/StoreAskForMode" returned
+    # "Illegal object" errors on MA3.  /NoConfirmation on each Store
+    # is sufficient — those Preference lines are omitted.
+    all_cmds: list[str] = ["Clear"]
 
     prev_time_s = 0.0
     summary_rows: list[tuple[int, str, int]] = []   # (cue_num, effect, n_steps)
