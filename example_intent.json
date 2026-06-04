@@ -18,7 +18,7 @@
       "duration_s": 4.0,
       "fade_s": 0.5,
       "states": [
-        {"group": "all",   "intensity": 100, "color": "white",
+        {"group": "all", "intensity": 100, "color": "white",
          "effect": {"type": "pulse", "speed": "1/4"}}
       ]
     },
@@ -30,7 +30,8 @@
       "states": [
         {"group": "truss", "intensity": 100, "color": "cyan",
          "effect": {"type": "strobe", "speed": "1/8"}},
-        {"group": "floor", "intensity":  40, "color": "off",   "effect": {"type": "none"}}
+        {"group": "floor", "intensity":  40, "color": "off",
+         "effect": {"type": "none"}}
       ]
     },
     {
@@ -39,7 +40,7 @@
       "duration_s": 8.0,
       "fade_s": 1.0,
       "states": [
-        {"group": "all",   "intensity":  80, "color": "magenta",
+        {"group": "all", "intensity": 80, "color": "magenta",
          "effect": {"type": "chase", "speed": "1/4"}}
       ]
     }

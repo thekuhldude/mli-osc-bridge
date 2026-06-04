@@ -230,16 +230,19 @@ class TestTranslateCue:
         )
         cmds = translate_cue(cue, grid, sequence_id=1)
 
-        # Fixture selections for all 4 truss fixtures
         fixture_cmds = [c for c in cmds if c.startswith("Fixture")]
-        assert len(fixture_cmds) == 4   # one per truss fixture
-
-        # Blue = (0, 0, 255)
+        assert len(fixture_cmds) == 4
         assert any("ColorRGB_B" in c and "At 255" in c for c in cmds)
         assert any("ColorRGB_R" in c and "At 0" in c for c in cmds)
+        assert all("At 80" in c for c in fixture_cmds)
 
-        # Intensity set on every fixture
-        assert all(f"At 80" in c for c in fixture_cmds)
+    def test_static_has_no_step2(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=2.0,
+            states=[GroupState(group="all", intensity=100, color="white")],
+        )
+        assert "Step 2" not in translate_cue(cue, grid)
 
     def test_store_command_present(self):
         _, grid = _simple_show()
@@ -256,8 +259,7 @@ class TestTranslateCue:
             cue_number=1, start_s=0.0, duration_s=2.0,
             states=[GroupState(group="all", intensity=100, color="white")],
         )
-        cmds = translate_cue(cue, grid)
-        assert any('TrigType" "Time"' in c for c in cmds)
+        assert any('TrigType" "Time"' in c for c in translate_cue(cue, grid))
 
     def test_clear_at_start_and_end(self):
         _, grid = _simple_show()
@@ -278,7 +280,123 @@ class TestTranslateCue:
         cmds = translate_cue(cue, grid)
         assert any("ColorRGB_R" in c and "At 255" in c for c in cmds)
         assert any("ColorRGB_G" in c and "At 128" in c for c in cmds)
-        assert any("ColorRGB_B" in c and "At 0" in c for c in cmds)
+        assert any("ColorRGB_B" in c and "At 0"   in c for c in cmds)
+
+    # ── Pulse ─────────────────────────────────────────────────────────────────
+
+    def test_pulse_has_step2(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="truss", intensity=100, color="white",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        assert "Step 2" in translate_cue(cue, grid)
+
+    def test_pulse_step1_on_step2_off(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="truss", intensity=80, color="blue",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        cmds = translate_cue(cue, grid)
+        step2_idx = cmds.index("Step 2")
+        on_cmds  = [c for c in cmds[:step2_idx]        if c.startswith("Fixture")]
+        off_cmds = [c for c in cmds[step2_idx + 1:]    if c.startswith("Fixture")]
+        assert all("At 80" in c for c in on_cmds)
+        assert all("At 0"  in c for c in off_cmds)
+
+    def test_pulse_rate_with_bpm(self):
+        _, grid = _simple_show()
+        # 60/120 * 0.25 = 0.125 s
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="all", intensity=100, color="white",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        cmds = translate_cue(cue, grid, bpm=120.0)
+        assert any("PhaseCycleTime" in c and "0.125" in c for c in cmds)
+
+    def test_pulse_no_rate_without_bpm(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="all", intensity=100, color="white",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        assert not any("PhaseCycleTime" in c for c in translate_cue(cue, grid, bpm=None))
+
+    # ── Strobe ────────────────────────────────────────────────────────────────
+
+    def test_strobe_has_step2(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="floor", intensity=100, color="red",
+                               effect=Effect(type=EffectType.STROBE, speed="1/8"))],
+        )
+        assert "Step 2" in translate_cue(cue, grid)
+
+    def test_strobe_rate_faster_than_1_bar(self):
+        # 1/8 at 120bpm → 60/120 * 0.125 = 0.0625 s
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="all", intensity=100, color="white",
+                               effect=Effect(type=EffectType.STROBE, speed="1/8"))],
+        )
+        cmds = translate_cue(cue, grid, bpm=120.0)
+        rate_cmd = next(c for c in cmds if "PhaseCycleTime" in c)
+        assert float(rate_cmd.split()[-1]) < 0.1
+
+    # ── Chase ─────────────────────────────────────────────────────────────────
+
+    def test_chase_has_step2(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=8.0,
+            states=[GroupState(group="all", intensity=80, color="cyan",
+                               effect=Effect(type=EffectType.CHASE, speed="1/4"))],
+        )
+        assert "Step 2" in translate_cue(cue, grid)
+
+    def test_chase_has_matricks_phase(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=8.0,
+            states=[GroupState(group="all", intensity=80, color="cyan",
+                               effect=Effect(type=EffectType.CHASE, speed="1/4"))],
+        )
+        cmds = translate_cue(cue, grid)
+        assert any("PhaseFrom" in c for c in cmds)
+        assert any("PhaseTo"   in c and "360" in c for c in cmds)
+
+    def test_chase_phase_0_to_360(self):
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=2, start_s=4.0, duration_s=4.0,
+            states=[GroupState(group="left", intensity=90, color="green",
+                               effect=Effect(type=EffectType.CHASE, speed="1/2"))],
+        )
+        cmds = translate_cue(cue, grid)
+        assert any('"PhaseFrom" 0'   in c for c in cmds)
+        assert any('"PhaseTo" 360'   in c for c in cmds)
+
+    # ── Programmer hygiene ────────────────────────────────────────────────────
+
+    def test_clear_after_every_effect_cue(self):
+        """Last command of every cue must be Clear — prevents step bleed."""
+        fixtures = _make_fixtures()
+        grid     = build_grid_from_fixtures(fixtures)
+        for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE, EffectType.NONE):
+            cue = CueIntent(
+                cue_number=1, start_s=0.0, duration_s=4.0,
+                states=[GroupState(group="all", intensity=100, color="white",
+                                   effect=Effect(type=etype, speed="1/4"))],
+            )
+            cmds = translate_cue(cue, grid)
+            assert cmds[-1] == "Clear", f"Last cmd for {etype} must be Clear"
 
 
 class TestTranslateShow:
@@ -290,7 +408,6 @@ class TestTranslateShow:
 
     def test_second_cue_trig_time_is_delta(self):
         show, grid = _simple_show()
-        # cue1.start=0.0, cue2.start=4.0 → delta=4.0
         cmds = translate_show(show, grid)
         cue2_cmd = next(c for c in cmds if "TrigTime" in c and "Cue 2.0" in c)
         assert "4.00" in cue2_cmd
@@ -303,8 +420,7 @@ class TestTranslateShow:
 
     def test_preferences_suppressed(self):
         show, grid = _simple_show()
-        cmds = translate_show(show, grid)
-        assert any("StoreAskForMode" in c for c in cmds)
+        assert any("StoreAskForMode" in c for c in translate_show(show, grid))
 
     def test_all_cues_stored(self):
         show, grid = _simple_show()
@@ -312,8 +428,19 @@ class TestTranslateShow:
         assert any("Store Sequence 1 Cue 1.0" in c for c in cmds)
         assert any("Store Sequence 1 Cue 2.0" in c for c in cmds)
 
+    def test_bpm_propagates_to_rate_commands(self):
+        fixtures = _make_fixtures()
+        grid     = build_grid_from_fixtures(fixtures)
+        show = ShowIntent(
+            bpm=120.0,
+            cues=[CueIntent(
+                cue_number=1, start_s=0.0, duration_s=4.0,
+                states=[GroupState(group="all", intensity=100, color="white",
+                                   effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+            )],
+        )
+        assert any("PhaseCycleTime" in c for c in translate_show(show, grid))
+
     def test_command_count_reasonable(self):
         show, grid = _simple_show()
-        cmds = translate_show(show, grid)
-        # At minimum: prefs(2) + clear(1) + per-cue(clear+4fixture*4cmds+store+trigtype+clear+trigtime)
-        assert len(cmds) > 20
+        assert len(translate_show(show, grid)) > 20
