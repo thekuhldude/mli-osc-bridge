@@ -302,8 +302,9 @@ class TestTranslateCue:
         )
         cmds = translate_cue(cue, grid)
         step2_idx = cmds.index("Step 2")
-        on_cmds  = [c for c in cmds[:step2_idx]        if c.startswith("Fixture")]
-        off_cmds = [c for c in cmds[step2_idx + 1:]    if c.startswith("Fixture")]
+        # Fixture programming commands contain " At " (exclude re-select "+" lines)
+        on_cmds  = [c for c in cmds[:step2_idx]     if c.startswith("Fixture") and " At " in c and "+" not in c]
+        off_cmds = [c for c in cmds[step2_idx + 1:] if c.startswith("Fixture") and " At " in c and "+" not in c]
         assert all("At 80" in c for c in on_cmds)
         assert all("At 0"  in c for c in off_cmds)
 
@@ -319,6 +320,20 @@ class TestTranslateCue:
         assert any("SpeedFromX" in c and "480" in c for c in cmds)
         assert not any("PhaseCycleTime" in c for c in cmds)
 
+    def test_pulse_phase_is_0_to_0(self):
+        """Pulse: PhaseToX=0 so all fixtures flash in phase (not cascaded)."""
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="truss", intensity=100, color="blue",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        cmds = translate_cue(cue, grid)
+        # PhaseToX must be 0 (in-phase), NOT 360
+        phase_to_cmds = [c for c in cmds if "PhaseToX" in c and "360" in c]
+        assert len(phase_to_cmds) == 0, "Pulse must use PhaseToX=0, not 360"
+        assert any('"PhaseToX"   0' in c for c in cmds)
+
     def test_pulse_speed_uses_default_bpm_when_none(self):
         # No BPM supplied → falls back to 120 default → 1/4 = 480
         _, grid = _simple_show()
@@ -330,6 +345,23 @@ class TestTranslateCue:
         cmds = translate_cue(cue, grid, bpm=None)
         assert any("SpeedFromX" in c for c in cmds)
         assert not any("PhaseCycleTime" in c for c in cmds)
+
+    def test_pulse_reselects_group_before_matricks(self):
+        """Group must be re-selected with '+' before MAtricks so all fixtures get speed."""
+        _, grid = _simple_show()
+        cue = CueIntent(
+            cue_number=1, start_s=0.0, duration_s=4.0,
+            states=[GroupState(group="truss", intensity=100, color="white",
+                               effect=Effect(type=EffectType.PULSE, speed="1/4"))],
+        )
+        cmds = translate_cue(cue, grid)
+        # Find the '+' re-select command
+        reselect_cmds = [c for c in cmds if "+" in c and c.startswith("Fixture")]
+        assert len(reselect_cmds) >= 1, "No group re-select with '+' found"
+        # Verify the re-select comes before the MAtricks speed command
+        reselect_idx = next(i for i, c in enumerate(cmds) if "+" in c and c.startswith("Fixture"))
+        speed_idx    = next(i for i, c in enumerate(cmds) if "SpeedFromX" in c)
+        assert reselect_idx < speed_idx
 
     # ── Strobe ────────────────────────────────────────────────────────────────
 
@@ -351,8 +383,10 @@ class TestTranslateCue:
                                effect=Effect(type=EffectType.STROBE, speed="1/8"))],
         )
         cmds = translate_cue(cue, grid, bpm=120.0)
-        speed_cmd = next(c for c in cmds if "SpeedFromX" in c)
-        assert float(speed_cmd.split()[-1]) >= 900   # 960 > pulse 480
+        # The last SpeedFromX command is the actual speed (not the reset 0)
+        speed_cmds = [c for c in cmds if "SpeedFromX" in c]
+        actual_speed = float(speed_cmds[-1].split()[-1])
+        assert actual_speed >= 900   # 960 > pulse 480
 
     # ── Chase ─────────────────────────────────────────────────────────────────
 
@@ -365,7 +399,7 @@ class TestTranslateCue:
         )
         assert "Step 2" in translate_cue(cue, grid)
 
-    def test_chase_has_matricks_phase_selection_syntax(self):
+    def test_chase_has_matricks_phase_360(self):
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=1, start_s=0.0, duration_s=8.0,
@@ -377,8 +411,8 @@ class TestTranslateCue:
         assert any("Set Selection MAtricks" in c and "PhaseToX"   in c and "360" in c
                    for c in cmds)
 
-    def test_chase_phase_uses_selection_not_pool_object(self):
-        """Must use 'Set Selection MAtricks', NOT 'Set MATricks 1'."""
+    def test_chase_reselects_group_with_plus(self):
+        """Chase must re-select full group with '+' before MAtricks."""
         _, grid = _simple_show()
         cue = CueIntent(
             cue_number=2, start_s=4.0, duration_s=4.0,
@@ -387,8 +421,8 @@ class TestTranslateCue:
         )
         cmds = translate_cue(cue, grid)
         assert not any("Set MATricks 1" in c for c in cmds)
-        assert any('"PhaseFromX" 0'   in c for c in cmds)
-        assert any('"PhaseToX"'       in c and "360" in c for c in cmds)
+        assert any("+" in c and c.startswith("Fixture") for c in cmds)
+        assert any('"PhaseToX"' in c and "360" in c for c in cmds)
 
     # ── Programmer hygiene ────────────────────────────────────────────────────
 
@@ -405,30 +439,35 @@ class TestTranslateCue:
             cmds = translate_cue(cue, grid)
             assert "Clear" in cmds, f"Clear missing for {etype}"
 
-    def test_matricks_reset_after_phaser_cue(self):
-        """Phaser cues must emit MAtricks reset after Clear to prevent bleed."""
+    def test_no_matricks_after_clear(self):
+        """MAtricks must NOT appear after the final Clear (Selection is empty)."""
         fixtures = _make_fixtures()
         grid     = build_grid_from_fixtures(fixtures)
-        for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE):
+        for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE, EffectType.NONE):
             cue = CueIntent(
                 cue_number=1, start_s=0.0, duration_s=4.0,
                 states=[GroupState(group="all", intensity=100, color="white",
                                    effect=Effect(type=etype, speed="1/4"))],
             )
             cmds = translate_cue(cue, grid)
-            clear_idx = max(i for i, c in enumerate(cmds) if c == "Clear")
-            tail = cmds[clear_idx:]
-            assert any("PhaseFromX" in c for c in tail), f"No PhaseFromX reset after Clear for {etype}"
-            assert any("SpeedFromX" in c for c in tail), f"No SpeedFromX reset after Clear for {etype}"
+            last_clear = max(i for i, c in enumerate(cmds) if c == "Clear")
+            post_clear = cmds[last_clear + 1:]
+            matricks_after = [c for c in post_clear if "MAtricks" in c]
+            assert matricks_after == [], (
+                f"Unexpected MAtricks after final Clear for {etype}: {matricks_after}"
+            )
 
-    def test_static_cue_ends_with_clear(self):
-        """Static cue has no phaser reset — last command is Clear."""
-        _, grid = _simple_show()
-        cue = CueIntent(
-            cue_number=1, start_s=0.0, duration_s=2.0,
-            states=[GroupState(group="mid", intensity=60, color="amber")],
-        )
-        assert translate_cue(cue, grid)[-1] == "Clear"
+    def test_all_cues_end_with_clear(self):
+        """Last command of every cue must be Clear."""
+        fixtures = _make_fixtures()
+        grid     = build_grid_from_fixtures(fixtures)
+        for etype in (EffectType.PULSE, EffectType.STROBE, EffectType.CHASE, EffectType.NONE):
+            cue = CueIntent(
+                cue_number=1, start_s=0.0, duration_s=4.0,
+                states=[GroupState(group="all", intensity=100, color="white",
+                                   effect=Effect(type=etype, speed="1/4"))],
+            )
+            assert translate_cue(cue, grid)[-1] == "Clear", f"Not Clear for {etype}"
 
 
 class TestTranslateShow:

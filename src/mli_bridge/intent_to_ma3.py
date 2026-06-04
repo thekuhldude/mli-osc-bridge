@@ -128,17 +128,51 @@ def _matricks_speed_commands(speed: str, bpm: float | None) -> list[str]:
     ]
 
 
-def _matricks_reset_commands() -> list[str]:
-    """Reset MAtricks phase and speed on the Selection after Clear.
+def _select_group(fixture_ids: list[int]) -> str:
+    """Build a single MA3 selection command for all fixtures using '+' syntax.
 
-    Prevents phase/speed values from a chase cue bleeding into the next
-    cue's programmer state.
+    ``Fixture 9 + 10 + 11 + 12``
+
+    Required before applying MAtricks so that SpeedFromX/PhaseFromX act on
+    ALL group fixtures simultaneously, not just the last individually selected one.
     """
+    return "Fixture " + " + ".join(str(fid) for fid in fixture_ids)
+
+
+def _apply_matricks(
+    fixture_ids: list[int],
+    phase_to: int,
+    speed: str,
+    bpm: float | None,
+) -> list[str]:
+    """Re-select the full group, reset MAtricks to neutral, then apply values.
+
+    Must be called BEFORE Store, while the programmer still holds step data.
+    The re-select ensures MAtricks targets ALL fixtures, not just the last one
+    that was individually programmed.
+
+    phase_to:
+        0   → whole group pulses/strobes in phase
+        360 → chase cascade left → right
+    """
+    pbpm = _phaser_bpm(speed, bpm)
+    logger.info(
+        "MAtricks: phase_to={} speed={!r} → phaser_bpm={:.1f}",
+        phase_to, speed, pbpm,
+    )
     return [
+        # Re-select all group fixtures at once (+ syntax)
+        _select_group(fixture_ids),
+        # Baseline reset first (clean slate in case previous cue's values linger)
         'Set Selection MAtricks "PhaseFromX" 0',
         'Set Selection MAtricks "PhaseToX"   0',
         'Set Selection MAtricks "SpeedFromX" 0',
         'Set Selection MAtricks "SpeedToX"   0',
+        # Apply desired values
+        f'Set Selection MAtricks "PhaseFromX" 0',
+        f'Set Selection MAtricks "PhaseToX"   {phase_to}',
+        f'Set Selection MAtricks "SpeedFromX" {pbpm:.1f}',
+        f'Set Selection MAtricks "SpeedToX"   {pbpm:.1f}',
     ]
 
 
@@ -160,11 +194,12 @@ def _fill_static(gs: GroupState, grid: dict) -> list[str]:
     return cmds
 
 
-def _fill_pulse(gs: GroupState, grid: dict) -> list[str]:
-    """2-step dimmer phaser: intensity ↔ 0, colour constant in both steps.
+def _fill_pulse(gs: GroupState, grid: dict, bpm: float | None) -> list[str]:
+    """2-step dimmer phaser (whole group pulses in phase): intensity ↔ 0.
 
-    MA3 linearly interpolates between steps by default, producing a
-    smooth breathing look.  Rate is set post-store via :func:`_set_rate_commands`.
+    PhaseFromX=0 / PhaseToX=0 — all fixtures start at the same phase,
+    so they breathe together.  Only speed differs from strobe.
+    MAtricks is applied after re-selecting the full group.
     """
     fixture_ids = resolve_group(gs.group, grid)
     r, g, b = _resolve_color(gs.color)
@@ -177,35 +212,29 @@ def _fill_pulse(gs: GroupState, grid: dict) -> list[str]:
         cmds.append(f'Attribute "ColorRGB_G" At {g}')
         cmds.append(f'Attribute "ColorRGB_B" At {b}')
 
-    # Switch to step 2 (creates the phaser when stored)
     cmds.append("Step 2")
 
     # ── Step 2 : off ─────────────────────────────────────────────────────────
-    # Keep colour in step 2 so MA3 interpolates colour channels too.
     for fid in fixture_ids:
         cmds.append(f"Fixture {fid} At 0")
         cmds.append(f'Attribute "ColorRGB_R" At {r}')
         cmds.append(f'Attribute "ColorRGB_G" At {g}')
         cmds.append(f'Attribute "ColorRGB_B" At {b}')
 
+    # ── MAtricks: re-select all, phase 0→0 (in-phase), set speed ─────────────
+    cmds.extend(_apply_matricks(fixture_ids, phase_to=0, speed=gs.effect.speed, bpm=bpm))
     return cmds
 
 
-def _fill_strobe(gs: GroupState, grid: dict) -> list[str]:
-    """2-step hard-snap dimmer phaser: intensity ↔ 0 at the chosen rate.
+def _fill_strobe(gs: GroupState, grid: dict, bpm: float | None) -> list[str]:
+    """2-step hard-snap dimmer phaser (same structure as pulse, faster speed).
 
-    Generic RGB fixtures do not have a native strobe/shutter attribute
-    (no GDTF Shutter or Strobe channel), so a dimmer phaser is used.
-    This is logged so it is easy to identify if a proper strobe fixture
-    is later patched that could use its native attribute instead.
-
-    Snap (zero-transition) behaviour is produced by setting a very short
-    cycle time so MA3 jumps between the two values without visible fade.
-    The rate command is emitted post-store by the caller.
+    Generic RGB fixtures have no native strobe attribute (logged).
+    Phase 0→0 keeps the whole group in sync; speed drives the flash rate.
     """
     logger.info(
         "strobe: Generic RGB has no native strobe attribute — "
-        "using 2-step dimmer phaser for group {!r} in cue.",
+        "using fast dimmer phaser for group {!r}.",
         gs.group,
     )
     fixture_ids = resolve_group(gs.group, grid)
@@ -219,32 +248,23 @@ def _fill_strobe(gs: GroupState, grid: dict) -> list[str]:
         cmds.append(f'Attribute "ColorRGB_G" At {g}')
         cmds.append(f'Attribute "ColorRGB_B" At {b}')
 
-    # Switch to step 2
     cmds.append("Step 2")
 
-    # ── Step 2 : hard off ─────────────────────────────────────────────────────
-    # Colour omitted in the dark step — dimmer = 0 so it makes no visual
-    # difference, and skipping colour commands shortens the command list.
+    # ── Step 2 : hard off ────────────────────────────────────────────────────
     for fid in fixture_ids:
         cmds.append(f"Fixture {fid} At 0")
 
+    # ── MAtricks: re-select all, phase 0→0 (in-phase), set speed ─────────────
+    cmds.extend(_apply_matricks(fixture_ids, phase_to=0, speed=gs.effect.speed, bpm=bpm))
     return cmds
 
 
-def _fill_chase(gs: GroupState, grid: dict) -> list[str]:
-    """2-step dimmer phaser + MATricks phase cascade (column order, left→right).
+def _fill_chase(gs: GroupState, grid: dict, bpm: float | None) -> list[str]:
+    """2-step dimmer phaser + MAtricks phase cascade (left→right column order).
 
-    Build a full/off phaser then spread the starting phase evenly across
-    the group's fixtures using MATricks so each fixture begins its cycle
-    at a different offset — producing a running-light chase.
-
-    MATricks reference:
-    https://help2.malighting.com/Page/grandMA3/keyword_matricks/en/1.2
-
-    MATricks 1 applies to the current programmer selection.
-    ``PhaseFrom 0 / PhaseTo 360`` distributes 0°–360° across the fixtures
-    in the order they appear in the programmer (resolve_group returns them
-    in column order — left → right).
+    PhaseFromX=0 / PhaseToX=360 distributes the start-phase 0°–360°
+    across the group so each fixture begins its cycle at a different
+    offset, producing a running-light cascade.
     """
     fixture_ids = resolve_group(gs.group, grid)
     r, g, b = _resolve_color(gs.color)
@@ -257,21 +277,14 @@ def _fill_chase(gs: GroupState, grid: dict) -> list[str]:
         cmds.append(f'Attribute "ColorRGB_G" At {g}')
         cmds.append(f'Attribute "ColorRGB_B" At {b}')
 
-    # Switch to step 2
     cmds.append("Step 2")
 
     # ── Step 2 : off ─────────────────────────────────────────────────────────
     for fid in fixture_ids:
         cmds.append(f"Fixture {fid} At 0")
 
-    # ── MAtricks phase distribution ───────────────────────────────────────────
-    # Applied AFTER step 2 data, still in the programmer, before Store.
-    # Spreads the phaser start-phase 0°–360° across the Selection in
-    # programmer order (= resolve_group column order = left → right).
-    # Ref: https://help2.malighting.com/Page/grandMA3/keyword_MAtricks/en/1.9
-    cmds.append('Set Selection MAtricks "PhaseFromX" 0')
-    cmds.append('Set Selection MAtricks "PhaseToX"   360')
-
+    # ── MAtricks: re-select all, phase 0→360 (cascade), set speed ────────────
+    cmds.extend(_apply_matricks(fixture_ids, phase_to=360, speed=gs.effect.speed, bpm=bpm))
     return cmds
 
 
@@ -282,18 +295,18 @@ def _fill_chase(gs: GroupState, grid: dict) -> list[str]:
 def _fill_group_state(
     gs: GroupState,
     grid: dict,
+    bpm: float | None = None,
 ) -> list[str]:
     """Route a GroupState to the correct fill function."""
     t = gs.effect.type
     if t == EffectType.NONE:
         return _fill_static(gs, grid)
     if t == EffectType.PULSE:
-        return _fill_pulse(gs, grid)
+        return _fill_pulse(gs, grid, bpm)
     if t == EffectType.STROBE:
-        return _fill_strobe(gs, grid)
+        return _fill_strobe(gs, grid, bpm)
     if t == EffectType.CHASE:
-        return _fill_chase(gs, grid)
-    # Should be unreachable given EffectType enum, but be safe
+        return _fill_chase(gs, grid, bpm)
     logger.error("Unknown effect type {!r}; falling back to static.", t.value)
     return _fill_static(gs, grid)
 
@@ -328,16 +341,11 @@ def translate_cue(
     """
     cmds: list[str] = ["Clear"]
 
-    has_phaser = any(gs.effect.type != EffectType.NONE for gs in cue.states)
-
-    # Programme all group states
+    # Programme all group states.
+    # Phaser fill functions embed the group re-select + MAtricks application
+    # BEFORE Store (while the programmer still holds step data).
     for gs in cue.states:
-        cmds.extend(_fill_group_state(gs, grid))
-
-    # Speed — set in programmer before Store via MAtricks SpeedFromX/ToX
-    for gs in cue.states:
-        if gs.effect.type != EffectType.NONE:
-            cmds.extend(_matricks_speed_commands(gs.effect.speed, bpm))
+        cmds.extend(_fill_group_state(gs, grid, bpm))
 
     # Store
     cmds.append(
@@ -350,13 +358,11 @@ def translate_cue(
         f' Property "TrigType" "Time"'
     )
 
-    # Clear programmer (critical — prevents step bleed)
+    # Clear programmer — must be last.
+    # No post-Clear MAtricks reset: the Selection is empty after Clear so
+    # those commands would be no-ops; the next cue's _apply_matricks
+    # emits a baseline reset while fixtures are selected.
     cmds.append("Clear")
-
-    # MAtricks reset — always emit so phase/speed from a chase/pulse don't
-    # linger in the Selection's MAtricks context for the next cue
-    if has_phaser:
-        cmds.extend(_matricks_reset_commands())
 
     return cmds
 
